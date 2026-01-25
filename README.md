@@ -1,3 +1,21 @@
+workflow:
+
+✅ Scrape web → เก็บ text/pdf/image
+
+✅ OCR PDF + OCR รูป
+
+✅ Vision understanding (caption/labels/relevance/keep_for_rag)
+
+✅ Ingest/Chunk/Clean → Embed → Index เข้า Chroma (Vector DB)
+
+✅ Agentic RAG (ReAct) ด้วย LangGraph: Router → Retrieve → Grader → (Fallback Web Search) → Synthesizer
+
+✅ Output 2 แบบ: Summary + Dashboard JSON
+
+✅ FastAPI endpoints ครบ: /scrape, /upload, /index, /ask, /dashboard/{job_id}, /health
+
+✅ Preflight logs เช็คทุกอย่าง (Playwright/OCR/Ollama/Vision/Embed/Tavily/Chroma)
+
 AI Web Scraping + OCR Pipeline (FastAPI)
 
 โปรเจคนี้เป็นระบบ Web Scraping + OCR + (Image Caption/Relevance) เพื่อดึงข้อมูลจากเว็บ (ข้อความ, ไฟล์, รูปภาพ) แล้วเก็บเป็นโครงสร้างที่พร้อมเอาไปทำ RAG / AI Agent / Dashboard ต่อได้
