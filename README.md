@@ -2,9 +2,9 @@ AI Web Scraping + OCR Pipeline (FastAPI)
 
 โปรเจคนี้เป็นระบบ Web Scraping + OCR + (Image Caption/Relevance) เพื่อดึงข้อมูลจากเว็บ (ข้อความ, ไฟล์, รูปภาพ) แล้วเก็บเป็นโครงสร้างที่พร้อมเอาไปทำ RAG / AI Agent / Dashboard ต่อได้
 
-============================================================
-Features
-============================================================
+
+**Features**
+
 
 1) Web Scraping (Playwright)
 - ค้นเว็บจาก keyword (Google Search ผ่าน Playwright)
@@ -25,17 +25,16 @@ Features
   - OCR รูป (jpg/png/webp) ด้วย PaddleOCR (ไทยหลัก + fallback อังกฤษ)
 - เช็คสถานะ OCR ได้ที่ /ocr/status/{job_id}
 
-============================================================
-Project Structure
-============================================================
+**Project Structure**
+
 
 - web_scraping.py   : FastAPI + scraper + download images/files + caption/relevance + OCR queue
 - ocr_pipeline.py   : OCR pipeline สำหรับ PDF + รูป (PaddleOCR + PyMuPDF)
 - .env              : ตั้งค่า Ollama host/model (ไม่ควร commit)
 
-============================================================
-Output Folder Structure (ตัวอย่าง)
-============================================================
+
+**Output Folder Structure (ตัวอย่าง)**
+
 
 (ค่า default ปัจจุบัน สร้างใน working directory)
 data_<keyword>_<timestamp>/
@@ -49,9 +48,9 @@ data_<keyword>_<timestamp>/
   - <pdf_name>/docs.jsonl
   - web_images/images.jsonl
 
-============================================================
-Requirements
-============================================================
+
+**Requirements**
+
 
 Python packages:
 fastapi, uvicorn, playwright, beautifulsoup4, requests, pandas, pillow, python-dotenv,
@@ -63,17 +62,17 @@ pip install fastapi uvicorn playwright beautifulsoup4 requests pandas pillow pyt
 ติดตั้ง browser ของ Playwright:
 playwright install
 
-============================================================
-Environment Variables (.env)
-============================================================
+
+**Environment Variables (.env)**
+
 
 ตัวอย่าง .env:
 OLLAMA_HOST=http://localhost:11434
 OLLAMA_VISION_MODEL=minicpm-v:2.6
 
-============================================================
-Run Server
-============================================================
+
+**Run Server**
+
 
 python web_scraping.py
 
@@ -83,9 +82,9 @@ uvicorn web_scraping:app --host 0.0.0.0 --port 8000 --reload
 Swagger:
 http://localhost:8000/docs
 
-============================================================
-API
-============================================================
+
+**API**
+
 
 1) GET /
 health check
