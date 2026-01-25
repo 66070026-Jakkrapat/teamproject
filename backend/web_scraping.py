@@ -198,7 +198,7 @@ ALLOWED_FILE_CT = {  # mapping content-type -> extension
 }
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")  # host ของ Ollama
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "minicpm-v:2.6")  # รุ่น vision model
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b")  # รุ่น vision model
 
 # ----------------------------
 # Output Base Directory
@@ -374,43 +374,65 @@ def goto_safely(page, url: str, timeout_ms: int = 90000) -> None:
 
 def caption_image_with_ollama(image_path: str, prompt: str) -> str:
     """
-    '''
-    เรียก Ollama Vision model เพื่อบรรยายภาพ (caption)
-    - ใช้ endpoint: POST {OLLAMA_HOST}/api/generate
-    - ส่ง image เป็น base64 ใน field "images"
-    - ส่ง prompt เป็นภาษาไทย/อังกฤษได้
-
-    คืนค่า:
-    - string caption (ถ้า fail จะคืน "")
-
-    หมายเหตุ:
-    - ต้องมี Ollama รันอยู่ และ model รองรับ vision (เช่น minicpm-v:2.6)
-    '''
+    เรียก Ollama Vision เพื่อบรรยายภาพ (caption)
+    - แนะนำใช้ /api/chat สำหรับ llava
+    - ถ้า /api/chat fail จะ fallback ไป /api/generate
     """
-    try:  # ครอบ try กันพัง
-        import base64  # import ในฟังก์ชันเพื่อไม่บังคับตอน import module
+    try:
+        import base64
+        with open(image_path, "rb") as f:
+            b = f.read()
+        img_b64 = base64.b64encode(b).decode("utf-8")
 
-        with open(image_path, "rb") as f:  # เปิดไฟล์ภาพ
-            b = f.read()  # อ่าน bytes
-
-        img_b64 = base64.b64encode(b).decode("utf-8")  # bytes -> base64 str
-
-        payload = {  # สร้าง payload ให้ Ollama
-            "model": OLLAMA_VISION_MODEL,  # รุ่นโมเดล
-            "prompt": prompt,  # prompt
-            "images": [img_b64],  # แนบภาพ
-            "stream": False,  # ไม่สตรีม
+        # --- 1) ใช้ /api/chat (เหมาะกับ llava) ---
+        chat_payload = {
+            "model": OLLAMA_VISION_MODEL,
+            "stream": False,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": [img_b64],
+                }
+            ],
+            "options": {
+                "temperature": 0.2,
+                "num_predict": 256
+            }
         }
 
-        r = requests.post(f"{OLLAMA_HOST}/api/generate", json=payload, timeout=90)  # ยิง request
-        if r.status_code != 200:  # ถ้าไม่ 200
-            return ""  # fail -> คืนว่าง
+        r = requests.post(f"{OLLAMA_HOST.rstrip('/')}/api/chat", json=chat_payload, timeout=120)
+        if r.status_code == 200:
+            data = r.json()
+            # /api/chat จะคืน message.content
+            msg = (data.get("message") or {})
+            text = (msg.get("content") or "").strip()
+            if text:
+                return text
 
-        data = r.json()  # อ่าน json
-        return (data.get("response") or "").strip()  # response text
+        # --- 2) fallback /api/generate ---
+        gen_payload = {
+            "model": OLLAMA_VISION_MODEL,
+            "prompt": prompt,
+            "images": [img_b64],
+            "stream": False,
+            "options": {"temperature": 0.2, "num_predict": 256}
+        }
+        r2 = requests.post(f"{OLLAMA_HOST.rstrip('/')}/api/generate", json=gen_payload, timeout=120)
+        if r2.status_code == 200:
+            data2 = r2.json()
+            return (data2.get("response") or "").strip()
 
-    except Exception:
-        return ""  # ถ้า exception -> คืนว่าง
+        # debug (สำคัญมาก)
+        print(f"❌ Ollama vision HTTP {r.status_code} @ /api/chat body={r.text[:200]}", flush=True)
+        print(f"❌ Ollama vision HTTP {r2.status_code} @ /api/generate body={r2.text[:200]}", flush=True)
+        return ""
+
+    except Exception as e:
+        print(f"❌ caption_image_with_ollama error: {e}", flush=True)
+        return ""
+
+
 
 
 def compute_relevance_score(page_text: str, image_caption: str) -> float:

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AI Scraper + OCR + Agentic RAG</title>
+  <link rel="stylesheet" href="/ui/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>AI Scraper + OCR + Agentic RAG</h1>
+      <p class="muted">ครบ flow: Scrape → OCR → Image Understanding → RAG → Agent → Summary + Dashboard</p>
+      <div class="row">
+        <button id="btnHealth">Health Check</button>
+        <span id="healthStatus" class="muted"></span>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>1) External Scrape</h2>
+      <div class="grid">
+        <label>Keyword
+          <input id="kw" placeholder="เช่น บริษัท SME ในไทย หรือ ธนาคารกรุงศรี annual report" />
+        </label>
+        <label>Amount
+          <input id="amt" type="number" value="5" min="1" max="20" />
+        </label>
+      </div>
+      <div class="row">
+        <button id="btnScrape">Scrape</button>
+        <button id="btnPostprocess" disabled>Postprocess (Vision+Report+Index)</button>
+      </div>
+      <pre id="scrapeOut"></pre>
+
+      <div class="row">
+        <label>OCR Job ID
+          <input id="jobId" placeholder="จะ auto ใส่ให้หลัง scrape" />
+        </label>
+        <button id="btnOcrStatus">Check OCR Status</button>
+      </div>
+      <pre id="ocrOut"></pre>
+    </section>
+
+    <section class="card">
+      <h2>2) Internal Upload PDF</h2>
+      <input id="pdfFile" type="file" accept=".pdf" />
+      <div class="row">
+        <button id="btnUpload">Upload & OCR & Index</button>
+      </div>
+      <pre id="uploadOut"></pre>
+    </section>
+
+    <section class="card">
+      <h2>3) Ask (Agentic RAG)</h2>
+      <label>Question
+        <textarea id="question" rows="4" placeholder="ถามเชิงธุรกิจ เช่น 'สรุปประเด็นสำคัญของงบการเงิน และแนวโน้ม'"></textarea>
+      </label>
+      <div class="row">
+        <label>Top-K
+          <input id="topk" type="number" value="10" min="1" max="30" />
+        </label>
+        <button id="btnAsk">Ask</button>
+      </div>
+      <pre id="askOut"></pre>
+
+      <h3>Dashboard</h3>
+      <div class="dash">
+        <div id="dashHighlights"></div>
+        <canvas id="chart" height="120"></canvas>
+        <div id="dashTables"></div>
+      </div>
+    </section>
+
+    <footer class="muted">
+      <div>API: <a href="/docs" target="_blank">Swagger</a></div>
+    </footer>
+  </div>
+
+  <script src="/ui/app.js"></script>
+</body>
+</html>

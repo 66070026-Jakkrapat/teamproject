@@ -47,6 +47,8 @@ test-results/
 
 # Chrome persistent profile created by web_scraping.py
 chrome_user_data/
+chroma_db
+rag_db
 
 # ---------------------------------------
 # OUTPUT DATA (สำคัญ: ไม่ต้อง commit ผล scrape/OCR)
