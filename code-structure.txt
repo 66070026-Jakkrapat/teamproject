@@ -1,0 +1,4277 @@
+===================================================
+                    code structure
+===================================================
+
+full_project/
+  .env
+  .env.exmaple
+  .gitignore
+  README.md
+  requirements.txt
+  test.py
+
+  ui/
+    index.html
+    styles.css
+    app.js
+    workflow.html
+    workflow.js
+    swagger_custom.js
+
+  backend/
+    __init__.py
+    settings.py
+    main.py
+
+    utils/
+      __init__.py
+      text.py
+      jsonl.py
+      job_manager.py
+
+    scraping/
+      __init__.py
+      web_scraping.py
+      facebook_scraping.py
+      recaptcha_solver.py
+
+    vision/
+      __init__.py
+      image_understanding.py
+
+    ocr/
+      __init__.py
+      ocr_pipeline.py
+
+    rag/
+      __init__.py
+      rag_store.py
+      structured_extractor.py
+      ingest.py
+
+    agent/
+      __init__.py
+      prompts.py
+      tavily_client.py
+      agent_flow.py
+
+    evaluation/
+      __init__.py
+      rag_eval.py
+      eval_runner.py
+      eval_dataset.example.json
+
+    report_utils/
+      __init__.py
+      report.py
+
+## 0) .env
+# ---- (optional) facebook login ----
+FB_EMAIL=arewe3215@gmail.com
+FB_PASS=thisuserisforwork2026
+
+# ---- API ----
+API_HOST=0.0.0.0
+API_PORT=8000
+
+# ---- Paths ----
+OUTPUT_BASE_DIR=./scraped_outputs
+UPLOAD_DIR=./tmp_uploads
+
+# ---- Vector DB (pgvector) ----
+DATABASE_URL=postgresql+asyncpg://postgres:2026@127.0.0.1:5436/ragdb
+
+# ---- Ollama ----
+OLLAMA_HOST=http://localhost:11434
+EMBED_MODEL=nomic-embed-text:latest
+EMBED_DIMS=768
+OLLAMA_LLM_MODEL=llama3.1:8b
+
+# ---- Image Caption ----
+BLIP_MODEL=Salesforce/blip-image-captioning-base
+
+# ---- Argos translate (en->th) ----
+ARGOS_SRC_LANG=en
+ARGOS_TGT_LANG=th
+
+# ---- Web Search fallback (only when /ask and rag not enough) ----
+TAVILY_API_KEY=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
+
+# ---- Optional ----
+DISABLE_MODEL_SOURCE_CHECK=True
+
+BROWSER_HEADLESS=false
+BROWSER_SLOWMO_MS=50
+
+
+PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=true
+
+## 1) requirements.txt
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+pandas
+beautifulsoup4
+playwright
+pillow
+
+pymupdf
+numpy
+paddleocr
+scikit-learn
+
+sqlalchemy>=2.0
+asyncpg
+pgvector
+
+transformers
+torch
+torchvision
+
+argostranslate
+
+httpx
+
+DrissionPage
+pydub
+SpeechRecognition
+
+sentencepiece
+
+opencv-python
+
+protobuf
+accelerate
+
+---
+
+## 2) .gitignore
+
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ajgay/
+env/
+dist/
+build/
+problem/
+
+scraped_outputs/
+tmp_uploads/
+*.db
+*.sqlite
+
+# playwright
+.playwright/
+**/storage_state*.json
+
+# logs
+*.log
+
+
+===================================================
+                        code
+===================================================
+
+
+1.) main.py:
+# backend/main.py
+from __future__ import annotations
+
+import os
+import time
+import uuid
+import threading
+import sys
+import traceback
+import asyncio
+from typing import Any, Dict
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, UploadFile, File, Body
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi import Response
+from backend.vision.image_understanding import warmup_blip
+from backend.settings import settings
+from backend.utils.job_manager import (
+    new_job, set_stage, log,
+    get_status, get_logs, get_workflow_steps
+)
+
+# ✅ แนะนำ: set env Paddle ไว้ตรงนี้ด้วย (กันหลุด)
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "true")
+
+from backend.scraping.web_scraping import run_external_scrape
+from backend.scraping.facebook_scraping import scrape_facebook_post_html
+from backend.vision.image_understanding import caption_images_with_blip_and_translate
+from backend.ocr.ocr_pipeline import process_folder_pdfs
+from backend.rag.rag_store import RAGStore
+from backend.rag.ingest import ingest_main_folder, ingest_text_blob
+from backend.agent.agent_flow import AgenticRAG
+from backend.report_utils.report import generate_report_md
+from backend.evaluation.eval_runner import run_eval
+
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+UI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ui"))
+
+store = RAGStore(
+    database_url=settings.DATABASE_URL,
+    ollama_host=settings.OLLAMA_HOST,
+    embed_model=settings.EMBED_MODEL,
+    embed_dims=settings.EMBED_DIMS
+)
+agent = AgenticRAG(store=store)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ✅ startup
+    os.makedirs(settings.OUTPUT_BASE_DIR, exist_ok=True)
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    await store.init_db()
+    # ใน lifespan:
+    warmup_blip(settings.BLIP_MODEL)
+    yield
+    # ✅ shutdown (ถ้าจะปิด engine ก็ทำได้ แต่ไม่จำเป็น)
+    # await store.engine.dispose()
+
+app = FastAPI(
+    title="AI Agent: Scraping + OCR + Dual RAG + Tavily + Evaluation",
+    description=(
+        "Workflow:\n"
+        "1) /pipeline/external/scrape\n"
+        "2) caption images (BLIP + Argos)\n"
+        "3) OCR PDFs\n"
+        "4) ingest to RAG (namespace external)\n"
+        "5) /ask (Agent) → structured/semantic → fallback Tavily\n"
+        "6) /eval/run precision/recall@k\n\n"
+        "UI Workflow: /ui/workflow\n"
+    ),
+    version="1.0.0",
+    lifespan=lifespan,  # ✅ เปลี่ยนตรงนี้
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+)
+
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    if os.path.exists(os.path.join(UI_DIR, "favicon.ico")):
+        return FileResponse(os.path.join(UI_DIR, "favicon.ico"))
+    return Response(status_code=204)
+
+
+@app.get("/docs", include_in_schema=False)
+def custom_swagger_ui_html():
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=app.title + " - Swagger UI",
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+        swagger_ui_parameters={"persistAuthorization": True},
+    )
+
+
+@app.get("/ui/swagger_custom.js", include_in_schema=False)
+def swagger_custom_js():
+    return FileResponse(os.path.join(UI_DIR, "swagger_custom.js"))
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/ui")
+
+
+@app.get("/ui", include_in_schema=False)
+def ui_index():
+    return FileResponse(os.path.join(UI_DIR, "index.html"))
+
+
+@app.get("/ui/workflow", include_in_schema=False)
+def ui_workflow():
+    return FileResponse(os.path.join(UI_DIR, "workflow.html"))
+
+
+@app.get("/ui/app.js", include_in_schema=False)
+def ui_app_js():
+    return FileResponse(os.path.join(UI_DIR, "app.js"))
+
+
+@app.get("/ui/workflow.js", include_in_schema=False)
+def ui_workflow_js():
+    return FileResponse(os.path.join(UI_DIR, "workflow.js"))
+
+
+@app.get("/ui/styles.css", include_in_schema=False)
+def ui_styles():
+    return FileResponse(os.path.join(UI_DIR, "styles.css"))
+
+@app.get("/workflow/steps")
+def workflow_steps():
+    return {"steps": get_workflow_steps()}
+
+
+@app.get("/jobs/{job_id}/status")
+def job_status(job_id: str):
+    return get_status(job_id)
+
+
+@app.get("/jobs/{job_id}/logs")
+def job_logs(job_id: str, tail: int = 200):
+    return {"job_id": job_id, "logs": get_logs(job_id, tail=tail)}
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "api": {"host": settings.API_HOST, "port": settings.API_PORT},
+        "paths": {"ui": "/ui", "workflow_ui": "/ui/workflow", "docs": "/docs"},
+        "db": {"database_url": settings.DATABASE_URL},
+        "models": {
+            "ollama_host": settings.OLLAMA_HOST,
+            "embed_model": settings.EMBED_MODEL,
+            "embed_dims": settings.EMBED_DIMS,
+            "blip_model": settings.BLIP_MODEL,
+        },
+        "output_dirs": {"output_base": settings.OUTPUT_BASE_DIR, "upload_dir": settings.UPLOAD_DIR},
+    }
+
+
+def _run_async(coro):
+    return asyncio.run(coro)
+
+
+def _external_pipeline_thread(job_id: str, keyword: str, amount: int):
+    if sys.platform.startswith("win"):
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    try:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        set_stage(job_id, "web_scraping", f"Scraping keyword={keyword} amount={amount}")
+        log(job_id, "info", "Starting external scrape...")
+        scrape = run_external_scrape(job_id, keyword, max_links=amount)
+        main_folder = scrape["main_folder"]
+        items = scrape["items"]
+
+        set_stage(job_id, "data_collecting", "Saved web content/images/pdfs", {"main_folder": main_folder, "items": items})
+        log(job_id, "info", "External scrape complete", {"main_folder": main_folder})
+
+        # captioning per site
+        set_stage(job_id, "captioning", "Captioning images (BLIP + Argos)...")
+        for it in items:
+            site_folder = it["Folder"]
+            content_path = os.path.join(site_folder, "content.txt")
+            ctx = ""
+            if os.path.exists(content_path):
+                ctx = open(content_path, "r", encoding="utf-8", errors="ignore").read()
+
+            images_dir = os.path.join(site_folder, "images")
+            images_meta = os.path.join(images_dir, "images_meta.jsonl")
+            images_under = os.path.join(site_folder, "images_understanding.jsonl")
+
+            # ✅ เพิ่มบรรทัดนี้
+            
+            images_download_meta = os.path.join(images_dir, "images_download_meta.jsonl")
+
+            res = caption_images_with_blip_and_translate(
+                images_dir=images_dir,
+                images_meta_jsonl=images_meta,
+                images_understanding_jsonl=images_under,
+                context_text=ctx,
+                blip_model=settings.BLIP_MODEL,
+                images_download_meta_jsonl=images_download_meta,  # ✅ เพิ่มบรรทัดนี้
+                dedupe=True
+            )
+
+            log(job_id, "info", "Captioned images", {"site_folder": site_folder, **res})
+
+
+        # OCR
+        set_stage(job_id, "ocr", "OCR PDFs (PyMuPDF + PaddleOCR)...")
+        out_root = os.path.join(main_folder, "ocr_results")
+        os.makedirs(out_root, exist_ok=True)
+
+        def pcb(p: dict):
+            if p.get("stage") in ("file_start", "page_done", "file_done", "done"):
+                log(job_id, "info", "OCR progress", p)
+
+        process_folder_pdfs(files_dir=main_folder, out_root=out_root, progress_cb=pcb)
+
+        # Ingest external (✅ FIX: use thread-local store/engine)
+        set_stage(job_id, "ingest_external", "Ingest to External RAG...")
+
+        store_thread = RAGStore(
+            database_url=settings.DATABASE_URL,
+            ollama_host=settings.OLLAMA_HOST,
+            embed_model=settings.EMBED_MODEL,
+            embed_dims=settings.EMBED_DIMS
+        )
+
+        async def _ingest():
+            # กันพลาดกรณี extension/table ยังไม่พร้อม
+            await store_thread.init_db()
+            summary = await ingest_main_folder(store_thread, "external", main_folder)
+            # ปิด engine ใน loop เดียวกัน
+            await store_thread.engine.dispose()
+            return summary
+
+        ingest_summary = run_async_in_new_loop(_ingest())
+        log(job_id, "info", "Ingest external done", ingest_summary)
+
+        report_path = generate_report_md(main_folder, {
+            "job_id": job_id,
+            "keyword": keyword,
+            "namespace": "external",
+            "ingest": ingest_summary
+        })
+        log(job_id, "info", "Generated report.md", {"report_path": report_path})
+
+        set_stage(job_id, "ready", "External pipeline completed ✅", {
+            "main_folder": main_folder,
+            "ingest": ingest_summary,
+            "report_path": report_path
+        })
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        msg = f"Pipeline failed: {type(e).__name__}: {repr(e)}"
+        set_stage(job_id, "error", msg)
+        log(job_id, "error", "Pipeline exception", {"error": repr(e), "type": type(e).__name__, "traceback": tb})
+
+
+@app.post("/pipeline/external/scrape")
+def start_external_scrape(payload: Dict[str, Any] = Body(...)):
+    keyword = (payload.get("keyword") or "").strip()
+    amount = int(payload.get("amount") or 5)
+    if not keyword:
+        return {"status": "bad_request", "message": "keyword required"}
+
+    job_id = uuid.uuid4().hex[:12]
+    new_job(job_id, kind="external_pipeline")
+    log(job_id, "info", "Job created")
+
+    t = threading.Thread(target=_external_pipeline_thread, args=(job_id, keyword, amount), daemon=True)
+    t.start()
+
+    return {"status": "ok", "job_id": job_id}
+
+
+@app.post("/facebook/scrape_post")
+def facebook_scrape_post(payload: Dict[str, Any] = Body(...)):
+    url = (payload.get("url") or "").strip()
+    headless = bool(payload.get("headless", True))
+    if not url:
+        return {"status": "bad_request", "message": "url required"}
+    job_id = uuid.uuid4().hex[:12]
+    new_job(job_id, kind="facebook_scrape")
+    set_stage(job_id, "web_scraping", "Scraping Facebook with login session...")
+    try:
+        out = scrape_facebook_post_html(job_id, url, headless=headless)
+        set_stage(job_id, "ready", "Facebook scrape done ✅", {"final_url": out["final_url"]})
+        return {"status": "ok", "job_id": job_id, "final_url": out["final_url"], "html_len": len(out["html"])}
+    except Exception as e:
+        set_stage(job_id, "error", f"Facebook scrape failed: {e}")
+        return {"status": "error", "job_id": job_id, "error": str(e)}
+
+
+@app.post("/pipeline/internal/upload_pdf")
+async def upload_pdf(file: UploadFile = File(...), entity_hint: str = "internal_doc"):
+    """
+    ✅ แก้: เก็บไฟล์ลงโฟลเดอร์เฉพาะ job แล้ว OCR เฉพาะโฟลเดอร์นั้น
+    """
+    job_id = uuid.uuid4().hex[:12]
+    new_job(job_id, kind="internal_pipeline")
+
+    job_dir = os.path.join(settings.UPLOAD_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    set_stage(job_id, "data_collecting", "Uploading file...")
+    save_path = os.path.join(job_dir, file.filename)
+    with open(save_path, "wb") as f:
+        f.write(await file.read())
+    log(job_id, "info", "Saved upload", {"path": save_path})
+
+    # OCR
+    set_stage(job_id, "ocr", "OCR uploaded pdf...")
+    out_root = os.path.join(job_dir, "ocr_results")
+    os.makedirs(out_root, exist_ok=True)
+
+    def pcb(p: dict):
+        if p.get("stage") in ("file_start", "page_done", "file_done", "done"):
+            log(job_id, "info", "OCR progress", p)
+
+    # ✅ OCR เฉพาะ job_dir (ไม่สแกนทั้ง tmp_uploads/)
+    process_folder_pdfs(files_dir=job_dir, out_root=out_root, progress_cb=pcb)
+
+    # ingest internal from OCR output
+    set_stage(job_id, "ingest_internal", "Ingesting to Internal RAG...")
+    added_chunks = added_facts = 0
+
+    from backend.utils.jsonl import iter_jsonl
+
+    for root, _, files in os.walk(out_root):
+        for fn in files:
+            if fn == "docs.jsonl":
+                docs = os.path.join(root, fn)
+                for obj in iter_jsonl(docs) or []:
+                    if obj.get("type") == "page_text":
+                        r = await ingest_text_blob(
+                            store, "internal",
+                            obj.get("text") or "",
+                            meta={
+                                "source_type": "internal_pdf_page",
+                                "source_path": save_path,
+                                "page": int(obj.get("page") or 0),
+                                "extract_method": obj.get("extract_method") or "",
+                            },
+                            entity_hint=entity_hint
+                        )
+                        added_chunks += r["chunks"]
+                        added_facts += r["facts"]
+
+    set_stage(job_id, "ready", "Internal ingest completed ✅", {
+        "upload_path": save_path,
+        "added_chunks": added_chunks,
+        "added_facts": added_facts
+    })
+    return {"status": "ok", "job_id": job_id, "upload_path": save_path, "added_chunks": added_chunks, "added_facts": added_facts}
+
+
+@app.post("/ask")
+async def ask(payload: Dict[str, Any] = Body(...)):
+    q = (payload.get("question") or "").strip()
+    if not q:
+        return {"status": "bad_request", "message": "question required"}
+    top_k = int(payload.get("top_k") or settings.RAG_TOP_K)
+    out = await agent.answer(q, top_k=top_k)
+    return {"status": "ok", **out}
+
+
+@app.get("/rag/preview")
+async def rag_preview(namespace: str = "external", source_type: str = "", limit: int = 30):
+    chunks = await store.preview_chunks(namespace=namespace, source_type=source_type, limit=limit)
+    return {"status": "ok", "namespace": namespace, "count": len(chunks), "chunks": chunks}
+
+
+@app.post("/rag/reset")
+async def rag_reset():
+    await store.reset_db()
+    return {"status": "ok", "message": "db reset done"}
+
+
+@app.post("/eval/run")
+async def eval_run(payload: Dict[str, Any] = Body(...)):
+    dataset_path = (payload.get("dataset_path") or "").strip()
+    namespace = (payload.get("namespace") or "external").strip()
+    k = int(payload.get("k") or 5)
+    if not dataset_path or not os.path.exists(dataset_path):
+        return {"status": "bad_request", "message": "dataset_path not found"}
+    results = await run_eval(store, dataset_path, namespace, k=k)
+    return {"status": "ok", "namespace": namespace, "k": k, "results": results}
+
+def run_async_in_new_loop(coro):
+    """Run async coroutine in a fresh event loop (safe for threads)."""
+    return asyncio.run(coro)
+
+
+
+if __name__ == "__main__":
+    import uvicorn
+    print(f"✅ Swagger: http://localhost:{settings.API_PORT}/docs")
+    print(f"✅ UI:      http://localhost:{settings.API_PORT}/ui")
+    print(f"✅ Flow UI: http://localhost:{settings.API_PORT}/ui/workflow")
+    uvicorn.run("backend.main:app", host=settings.API_HOST, port=settings.API_PORT, reload=True)
+
+
+==================================================================================================
+
+2.) settings.py:
+
+# backend/settings.py
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENV_PATH = PROJECT_ROOT / ".env"
+load_dotenv(ENV_PATH)
+
+@dataclass
+class Settings:
+    # API
+    API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
+    API_PORT: int = int(os.getenv("API_PORT", "8000"))
+
+    # Output dirs
+    OUTPUT_BASE_DIR: str = os.getenv("OUTPUT_BASE_DIR", str(PROJECT_ROOT / "scraped_outputs"))
+    UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", str(PROJECT_ROOT / "tmp_uploads"))
+
+    # DB / RAG
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://postgres:2026@127.0.0.1:5436/ragdb"
+    )
+    EMBED_MODEL: str = os.getenv("EMBED_MODEL", "nomic-embed-text:latest")
+    EMBED_DIMS: int = int(os.getenv("EMBED_DIMS", "768"))
+    OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    OLLAMA_LLM_MODEL: str = os.getenv("OLLAMA_LLM_MODEL", "llama3.1:8b")
+
+    # Vision caption
+    BLIP_MODEL: str = os.getenv("BLIP_MODEL", "Salesforce/blip-image-captioning-base")
+    ARGOS_SRC_LANG: str = os.getenv("ARGOS_SRC_LANG", "en")
+    ARGOS_TGT_LANG: str = os.getenv("ARGOS_TGT_LANG", "th")
+
+    # Browser (Playwright/Drission)
+    BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "false").lower() in ("1", "true", "yes")
+    BROWSER_SLOWMO_MS: int = int(os.getenv("BROWSER_SLOWMO_MS", "0"))
+
+    # Facebook
+    FB_EMAIL: str = os.getenv("FB_EMAIL", "")
+    FB_PASS: str = os.getenv("FB_PASS", "")
+    FB_STORAGE_STATE_PATH: str = os.getenv(
+        "FB_STORAGE_STATE_PATH",
+        str(PROJECT_ROOT / "backend" / "scraping" / "storage_state_facebook.json")
+    )
+
+    # Tavily
+    TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
+    TAVILY_MAX_RESULTS: int = int(os.getenv("TAVILY_MAX_RESULTS", "5"))
+
+    # Pipeline
+    WAIT_TIMEOUT_SEC: int = int(os.getenv("WAIT_TIMEOUT_SEC", "1800"))
+    WAIT_POLL_SEC: float = float(os.getenv("WAIT_POLL_SEC", "1.5"))
+    DISABLE_MODEL_SOURCE_CHECK: bool = os.getenv("DISABLE_MODEL_SOURCE_CHECK", "true").lower() in ("1", "true", "yes")
+
+    # Agent
+    ROUTE_PREFER_INTERNAL: bool = os.getenv("ROUTE_PREFER_INTERNAL", "true").lower() in ("1", "true", "yes")
+    RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "8"))
+
+settings = Settings()
+
+==================================================================================================
+
+3.) agent_flow.py:
+# backend/agent/agent_flow.py
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
+import httpx
+
+from backend.settings import settings
+from backend.rag.rag_store import RAGStore, RetrievedChunk
+from backend.agent.prompts import ROUTER_PROMPT, SYNTH_PROMPT, TAVILY_PROMPT
+from backend.agent.tavily_client import tavily_search
+
+
+class OllamaLLM:
+    def __init__(self, host: str, model: str, timeout_s: int = 120):
+        self.host = host.rstrip("/")
+        self.model = model
+        self.timeout_s = timeout_s
+
+    async def generate(self, prompt: str) -> str:
+        payload = {"model": self.model, "prompt": prompt, "stream": False}
+        timeout = httpx.Timeout(self.timeout_s)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{self.host}/api/generate", json=payload)
+        if r.status_code != 200:
+            raise RuntimeError(f"Ollama generate failed: {r.status_code} {r.text[:200]}")
+        data = r.json()
+        return (data.get("response") or "").strip()
+
+
+def heuristic_route(question: str) -> str:
+    q = (question or "").lower()
+    structured_signals = [
+        "จำนวนพนักงาน", "พนักงาน", "employees", "employee",
+        "รายได้", "revenue", "กำไร", "profit",
+        "สินทรัพย์", "assets", "หนี้สิน", "liabilities",
+        "เท่าไหร่", "กี่คน", "ตัวเลข", "เปอร์เซ็นต์", "%"
+    ]
+    if any(s in q for s in structured_signals):
+        return "structured_rag"
+    return "semantic_rag"
+
+
+def normalize_key_from_question(question: str) -> str:
+    q = (question or "").lower()
+    if any(k in q for k in ["พนักงาน", "employees", "employee"]):
+        return "employees"
+    if any(k in q for k in ["รายได้", "revenue"]):
+        return "revenue"
+    if any(k in q for k in ["กำไร", "profit", "net income", "net_income"]):
+        return "profit"
+    if any(k in q for k in ["สินทรัพย์", "assets"]):
+        return "assets"
+    if any(k in q for k in ["หนี้สิน", "liabilities"]):
+        return "liabilities"
+    return ""
+
+
+def format_context(chunks: List[RetrievedChunk], limit_chars: int = 8000) -> str:
+    parts: List[str] = []
+    total = 0
+    for c in chunks:
+        m = c.meta or {}
+        src = m.get("source_url") or m.get("source_path") or m.get("source_type") or "unknown"
+        ns = m.get("namespace", "")
+        page = m.get("page")
+        if page:
+            src = f"{src} (page {page})"
+        block = f"SOURCE: [{ns}] {src}\nTEXT:\n{c.text}".strip()
+        if total + len(block) > limit_chars:
+            break
+        parts.append(block)
+        total += len(block) + 2
+    return "\n\n---\n\n".join(parts)
+
+
+def snippets_to_text(results: list[dict], max_chars: int = 7000) -> str:
+    out = []
+    total = 0
+    for r in results[:10]:
+        url = r.get("url", "")
+        title = r.get("title", "")
+        content = (r.get("content", "") or "").strip()
+        block = f"- title: {title}\n  url: {url}\n  content: {content}".strip()
+        if total + len(block) > max_chars:
+            break
+        out.append(block)
+        total += len(block) + 1
+    return "\n\n".join(out)
+
+
+class AgenticRAG:
+    def __init__(self, store: RAGStore):
+        self.store = store
+        self.llm = OllamaLLM(settings.OLLAMA_HOST, settings.OLLAMA_LLM_MODEL)
+
+    async def route(self, question: str) -> str:
+        base = heuristic_route(question)
+        try:
+            out = (await self.llm.generate(ROUTER_PROMPT.format(question=question))).strip().lower()
+            if "structured" in out:
+                return "structured_rag"
+            if "semantic" in out:
+                return "semantic_rag"
+            return base
+        except Exception:
+            return base
+
+    async def answer(self, question: str, top_k: int = 8) -> Dict[str, Any]:
+        route = await self.route(question)
+        namespaces_order = ["internal", "external"] if settings.ROUTE_PREFER_INTERNAL else ["external", "internal"]
+
+        if route == "structured_rag":
+            key = normalize_key_from_question(question)
+            if key:
+                facts = []
+                for ns in namespaces_order:
+                    facts.extend(await self.store.query_structured(ns, key=key, limit=30))
+                if facts:
+                    lines = ["คำตอบจาก Structured RAG (ข้อเท็จจริง):\n"]
+                    for f in facts[:25]:
+                        src = f"{f.get('source_path','')} (page {f.get('page',0)})" if f.get("page") else f.get("source_path", "")
+                        lines.append(
+                            f"- [{f['namespace']}] {f['entity']} | {f['key']} = {f['value']} {f.get('unit','')} (year={f.get('year',0)}) [source: {src}]"
+                        )
+                    return {"route": "structured_rag", "answer": "\n".join(lines), "chunks": [], "tavily_used": False}
+            route = "semantic_rag"
+
+        all_chunks: List[RetrievedChunk] = []
+        for ns in namespaces_order:
+            chunks = await self.store.query_semantic(ns, question, top_k=top_k)
+            all_chunks.extend(chunks)
+
+        all_chunks = sorted(all_chunks, key=lambda x: x.score, reverse=True)[:top_k]
+        ctx = format_context(all_chunks, limit_chars=8500)
+
+        if ctx.strip():
+            try:
+                ans = await self.llm.generate(SYNTH_PROMPT.format(question=question, context=ctx))
+                low = (len(all_chunks) == 0) or (all_chunks[0].score < 0.12)
+                if low:
+                    return await self._tavily_fallback(question, all_chunks)
+                return {"route": "semantic_rag", "answer": ans, "chunks": [c.meta for c in all_chunks], "tavily_used": False}
+            except Exception:
+                return await self._tavily_fallback(question, all_chunks)
+
+        return await self._tavily_fallback(question, all_chunks)
+
+    async def _tavily_fallback(self, question: str, chunks: List[RetrievedChunk]) -> Dict[str, Any]:
+        t = tavily_search(question, max_results=settings.TAVILY_MAX_RESULTS)
+        if not t.get("ok"):
+            return {
+                "route": "tavily_fallback",
+                "answer": f"ไม่พบข้อมูลเพียงพอใน RAG และ Tavily ใช้งานไม่ได้: {t.get('error')}",
+                "chunks": [c.meta for c in chunks],
+                "tavily_used": True
+            }
+
+        results = t.get("results", [])
+        snippets = snippets_to_text(results)
+
+        try:
+            ans = await self.llm.generate(TAVILY_PROMPT.format(question=question, snippets=snippets))
+        except Exception:
+            ans = "สรุปไม่ได้ด้วย LLM ในตอนนี้ แต่พบผลค้นหา Tavily:\n\n" + snippets
+
+        return {
+            "route": "tavily_fallback",
+            "answer": ans,
+            "chunks": [c.meta for c in chunks],
+            "tavily_used": True,
+            "tavily_results": results[: settings.TAVILY_MAX_RESULTS]
+        }
+
+==================================================================================================
+
+4.) prompts.py:
+
+# backend/agent/prompts.py
+ROUTER_PROMPT = """You are a router for RAG.
+Choose ONLY one token:
+- semantic_rag
+- structured_rag
+
+structured_rag: exact facts like employees, revenue, profit, numeric fields, table-like questions.
+semantic_rag: summaries, explanations, opinions, analysis, reasons, trends.
+
+Question:
+{question}
+"""
+
+SYNTH_PROMPT = """You are an intelligent assistant for question-answering tasks.
+Use ONLY the provided context to answer the question.
+If context is insufficient, say you don't know.
+
+Rules:
+1) Answer comprehensively based ONLY on context.
+2) If conflicting info exists, explicitly describe conflicts.
+3) Always add citations per paragraph in the format: [source: ...]
+4) Output in Thai.
+
+Question:
+{question}
+
+Context blocks (each has SOURCE + TEXT):
+{context}
+
+Return plain text only.
+"""
+
+TAVILY_PROMPT = """You are an intelligent assistant.
+You have web search snippets (title/url/content).
+Answer the question in Thai using ONLY the snippets.
+Add citations per paragraph like [source: <url>].
+
+Question:
+{question}
+
+Snippets:
+{snippets}
+"""
+
+==================================================================================================
+
+5.) tavily_client.py:
+# backend/agent/tavily_client.py
+from __future__ import annotations
+
+from typing import Any, Dict, List
+import requests
+
+from backend.settings import settings
+
+def tavily_search(query: str, max_results: int = 5) -> Dict[str, Any]:
+    if not settings.TAVILY_API_KEY:
+        return {"ok": False, "error": "TAVILY_API_KEY missing", "results": []}
+
+    payload = {
+        "api_key": settings.TAVILY_API_KEY,
+        "query": query,
+        "max_results": max_results,
+        "include_answer": False,
+        "include_raw_content": False,
+        "search_depth": "advanced",
+    }
+    try:
+        r = requests.post("https://api.tavily.com/search", json=payload, timeout=30)
+        if r.status_code != 200:
+            return {"ok": False, "error": f"{r.status_code}: {r.text[:200]}", "results": []}
+        data = r.json()
+        return {"ok": True, "results": data.get("results", [])}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "results": []}
+
+==================================================================================================
+
+6.) eval_dataset.example.json:
+[
+  {
+    "question": "บริษัทมีแนวทางด้านความยั่งยืนอย่างไร",
+    "relevant_chunks": ["sustainability", "esg", "carbon", "environment", "ความยั่งยืน"]
+  },
+  {
+    "question": "จำนวนพนักงานของบริษัทเท่าไหร่",
+    "relevant_chunks": ["employees", "พนักงาน", "headcount"]
+  }
+]
+
+==================================================================================================
+
+7.) eval_runner.py:
+
+# backend/evaluation/eval_runner.py
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List
+
+from backend.rag.rag_store import RAGStore
+from backend.evaluation.rag_eval import precision_recall_at_k
+
+async def run_eval(store: RAGStore, dataset_path: str, namespace: str, k: int = 5) -> List[Dict[str, Any]]:
+    dataset = json.load(open(dataset_path, encoding="utf-8"))
+    results = []
+
+    for item in dataset:
+        q = item["question"]
+        patterns = item["relevant_chunks"]
+        chunks = await store.query_semantic(namespace, q, top_k=max(k, 8))
+        texts = [c.text for c in chunks]
+        score = precision_recall_at_k(texts, patterns, k)
+        score["question"] = q
+        score["namespace"] = namespace
+        results.append(score)
+
+    return results
+
+==================================================================================================
+
+8.) rag_eval.py:
+# backend/evaluation/rag_eval.py
+from __future__ import annotations
+
+from typing import Dict, List
+
+def is_relevant(chunk_text: str, patterns: List[str]) -> bool:
+    text = (chunk_text or "").lower()
+    return any((p or "").lower() in text for p in patterns)
+
+def precision_recall_at_k(retrieved_chunks: List[str], relevant_patterns: List[str], k: int) -> Dict[str, float]:
+    top_k = retrieved_chunks[:k]
+    relevant_retrieved = sum(1 for c in top_k if is_relevant(c, relevant_patterns))
+    total_relevant = sum(1 for c in retrieved_chunks if is_relevant(c, relevant_patterns))
+
+    precision = relevant_retrieved / k if k else 0.0
+    recall = relevant_retrieved / total_relevant if total_relevant else 0.0
+    return {
+        "precision@k": round(precision, 4),
+        "recall@k": round(recall, 4),
+        "relevant_retrieved": relevant_retrieved,
+        "total_relevant": total_relevant
+    }
+
+==================================================================================================
+
+9.) 
+ocr_pipeline.py:
+# backend/ocr/ocr_pipeline.py
+from __future__ import annotations
+
+import os
+
+# ✅ ต้องอยู่ก่อน "from paddleocr import PaddleOCR"
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "true")
+
+import re
+import json
+import hashlib
+from typing import Any, Dict, List, Optional, Callable, Tuple
+
+import fitz  # PyMuPDF
+from PIL import Image
+import numpy as np
+from paddleocr import PaddleOCR
+
+from backend.utils.text import normalize_text, contains_thai
+from backend.utils.jsonl import append_jsonl, safe_mkdir
+
+PRIMARY_LANG = "th"
+FALLBACK_LANG = "en"
+MIN_TEXT_CHARS = 300
+OCR_DPI = 300
+MAX_IMAGE_PER_PAGE = 10
+
+ProgressCB = Callable[[Dict[str, Any]], None]
+
+def sha1_bytes(b: bytes) -> str:
+    return hashlib.sha1(b).hexdigest()
+
+def render_page_image(page: fitz.Page, dpi: int = OCR_DPI) -> Image.Image:
+    zoom = dpi / 72.0
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+def extract_text_layer(page: fitz.Page) -> str:
+    return normalize_text(page.get_text("text") or "")
+
+def extract_images_from_page(doc: fitz.Document, page: fitz.Page, out_dir: str, max_images: int = MAX_IMAGE_PER_PAGE) -> List[str]:
+    safe_mkdir(out_dir)
+    saved: List[str] = []
+    img_list = page.get_images(full=True) or []
+    for i, img_info in enumerate(img_list[:max_images]):
+        xref = img_info[0]
+        base = doc.extract_image(xref)
+        if not base:
+            continue
+        img_bytes = base.get("image", b"")
+        ext = base.get("ext", "png")
+        if not img_bytes or len(img_bytes) < 10_000:
+            continue
+        name = f"p{page.number + 1}_img{i + 1}.{ext}"
+        path = os.path.join(out_dir, name)
+        with open(path, "wb") as f:
+            f.write(img_bytes)
+        saved.append(path)
+    return saved
+
+def paddle_ocr_page(ocr: PaddleOCR, img: Image.Image) -> str:
+    arr = np.array(img)
+    res = ocr.ocr(arr, cls=True)
+    lines: List[str] = []
+    for block in (res or []):
+        for item in block:
+            txt = item[1][0]
+            if txt:
+                lines.append(txt)
+    return normalize_text("\n".join(lines))
+
+def paddle_ocr_image_text_only(ocr: PaddleOCR, img: Image.Image, conf_threshold: float = 0.55) -> str:
+    arr = np.array(img)
+    res = ocr.ocr(arr, cls=True)
+    lines: List[str] = []
+    for block in (res or []):
+        for item in block:
+            txt = item[1][0]
+            conf = float(item[1][1])
+            if txt and conf >= conf_threshold:
+                lines.append(txt)
+    return normalize_text("\n".join(lines))
+
+def process_pdf_to_jsonl(
+    pdf_path: str,
+    out_root: str,
+    ocr_th: PaddleOCR,
+    ocr_en: PaddleOCR,
+    progress_cb: Optional[ProgressCB] = None,
+) -> str:
+    safe_mkdir(out_root)
+    pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    out_dir = os.path.join(out_root, pdf_name)
+    safe_mkdir(out_dir)
+
+    images_dir = os.path.join(out_dir, "images")
+    safe_mkdir(images_dir)
+
+    docs_jsonl = os.path.join(out_dir, "docs.jsonl")
+
+    doc = fitz.open(pdf_path)
+    pdf_sha1 = sha1_bytes(open(pdf_path, "rb").read())
+    total_pages = len(doc)
+
+    for pno in range(total_pages):
+        page = doc[pno]
+        text_layer = extract_text_layer(page)
+        use_ocr = len(text_layer) < MIN_TEXT_CHARS
+        prefer_th = contains_thai(text_layer)
+
+        if use_ocr:
+            img = render_page_image(page, dpi=OCR_DPI)
+            try:
+                if prefer_th:
+                    page_text = paddle_ocr_page(ocr_th, img)
+                    method = "paddleocr_th"
+                    if len(page_text) < 50:
+                        t2 = paddle_ocr_page(ocr_en, img)
+                        if len(t2) > len(page_text):
+                            page_text, method = t2, "paddleocr_fallback"
+                else:
+                    page_text = paddle_ocr_page(ocr_en, img)
+                    method = "paddleocr_en"
+                    if len(page_text) < 50:
+                        t2 = paddle_ocr_page(ocr_th, img)
+                        if len(t2) > len(page_text):
+                            page_text, method = t2, "paddleocr_fallback"
+            except Exception:
+                page_text, method = "", "paddleocr_error"
+        else:
+            page_text, method = text_layer, "text_layer"
+
+        if page_text.strip():
+            append_jsonl(docs_jsonl, {
+                "type": "page_text",
+                "source_pdf": pdf_path,
+                "pdf_sha1": pdf_sha1,
+                "page": pno + 1,
+                "extract_method": method,
+                "text": page_text,
+            })
+
+        saved_imgs = extract_images_from_page(doc, page, images_dir)
+        for ipath in saved_imgs:
+            try:
+                im = Image.open(ipath).convert("RGB")
+            except Exception:
+                continue
+            try:
+                if prefer_th:
+                    img_ocr = paddle_ocr_image_text_only(ocr_th, im)
+                    if len(img_ocr) < 30:
+                        img2 = paddle_ocr_image_text_only(ocr_en, im)
+                        if len(img2) > len(img_ocr):
+                            img_ocr = img2
+                else:
+                    img_ocr = paddle_ocr_image_text_only(ocr_en, im)
+                    if len(img_ocr) < 30:
+                        img2 = paddle_ocr_image_text_only(ocr_th, im)
+                        if len(img2) > len(img_ocr):
+                            img_ocr = img2
+            except Exception:
+                img_ocr = ""
+
+            append_jsonl(docs_jsonl, {
+                "type": "figure",
+                "source_pdf": pdf_path,
+                "pdf_sha1": pdf_sha1,
+                "page": pno + 1,
+                "image_path": ipath,
+                "image_ocr": img_ocr,
+            })
+
+        if progress_cb:
+            progress_cb({"stage": "page_done", "current_page": pno + 1, "total_pages": total_pages})
+
+    doc.close()
+    return docs_jsonl
+
+def list_pdf_files(root_dir: str) -> List[str]:
+    pdfs: List[str] = []
+    for root, _, files in os.walk(root_dir):
+        for fn in files:
+            if fn.lower().endswith(".pdf"):
+                pdfs.append(os.path.join(root, fn))
+    return sorted(pdfs)
+
+def process_folder_pdfs(files_dir: str, out_root: str, progress_cb: Optional[ProgressCB] = None) -> List[str]:
+    pdf_paths = list_pdf_files(files_dir)
+    total = len(pdf_paths)
+
+    if progress_cb:
+        progress_cb({"stage": "start", "total_files": total, "done_files": 0, "percent": 0, "message": "starting ocr"})
+
+    ocr_th = PaddleOCR(use_angle_cls=True, lang=PRIMARY_LANG)
+    ocr_en = PaddleOCR(use_angle_cls=True, lang=FALLBACK_LANG)
+
+    outputs: List[str] = []
+    for idx, pdf_path in enumerate(pdf_paths, start=1):
+        if progress_cb:
+            progress_cb({
+                "stage": "file_start",
+                "total_files": total,
+                "done_files": idx - 1,
+                "percent": int(((idx - 1) / max(total, 1)) * 100),
+                "current_file": pdf_path,
+                "message": f"processing {idx}/{total}",
+            })
+
+        out_jsonl = process_pdf_to_jsonl(pdf_path, out_root, ocr_th, ocr_en, progress_cb)
+        outputs.append(out_jsonl)
+
+        if progress_cb:
+            progress_cb({
+                "stage": "file_done",
+                "total_files": total,
+                "done_files": idx,
+                "percent": int((idx / max(total, 1)) * 100),
+                "current_file": pdf_path,
+                "last_output": out_jsonl,
+                "message": f"done {idx}/{total}",
+            })
+
+    if progress_cb:
+        progress_cb({"stage": "done", "total_files": total, "done_files": total, "percent": 100, "message": "all done"})
+    return outputs
+
+==================================================================================================
+
+10.) ingest.py:
+# backend/rag/ingest.py
+from __future__ import annotations
+
+import os
+import re
+import asyncio
+from typing import Any, Dict, List, Tuple
+
+from backend.utils.text import normalize_text, chunk_text
+from backend.utils.jsonl import iter_jsonl
+from backend.rag.rag_store import RAGStore
+from backend.rag.structured_extractor import extract_facts_llm
+
+
+# ============================
+# Chunking (for embeddings)
+# ============================
+# nomic-embed-text บางครั้งจะ error ถ้า input ยาวเกิน context -> ต้อง "split" (ไม่ truncate)
+EMBED_MAX_CHARS = 5000
+EMBED_OVERLAP = 200
+
+
+def _split_by_chars(text: str, max_chars: int = EMBED_MAX_CHARS, overlap: int = EMBED_OVERLAP) -> List[str]:
+    """
+    Split แบบไม่ทำข้อมูลหาย: ตัดเป็นช่วง ๆ (มี overlap)
+    - ไม่ truncate ทิ้ง
+    - ใช้ overlap กันเนื้อหาขาดช่วง (ช่วย semantic retrieval)
+    """
+    t = (text or "").strip()
+    if not t:
+        return []
+    if len(t) <= max_chars:
+        return [t]
+
+    out: List[str] = []
+    step = max_chars - max(0, overlap)
+    if step <= 0:
+        step = max_chars
+
+    i = 0
+    while i < len(t):
+        out.append(t[i : i + max_chars])
+        i += step
+
+    return [x.strip() for x in out if x.strip()]
+
+
+def _ensure_embed_safe_chunks(chunks: List[str], max_chars: int = EMBED_MAX_CHARS) -> List[str]:
+    """
+    รับ chunks จาก chunk_text แล้ว “แตกต่อ” เฉพาะตัวที่ใหญ่เกิน max_chars
+    เพื่อให้ Ollama embeddings ไม่พัง (ไม่ทำข้อมูลหาย)
+    """
+    out: List[str] = []
+    for c in chunks:
+        c = (c or "").strip()
+        if not c:
+            continue
+        if len(c) <= max_chars:
+            out.append(c)
+        else:
+            out.extend(_split_by_chars(c, max_chars=max_chars, overlap=EMBED_OVERLAP))
+    return out
+
+
+# ============================
+# Facts extraction (avoid huge context)
+# ============================
+# แนวคิด:
+# - ห้ามส่ง “ก้อนยักษ์” เข้า LLM เพื่อ extract facts
+# - ให้เลือก “top chunks” ที่น่ามีตัวเลข/ข้อมูลสำคัญ แล้วค่อย extract ทีละ chunk
+FACTS_TOP_K = 10
+FACTS_MAX_CONCURRENCY = 3
+FACTS_MIN_CHARS = 120
+
+# กัน LLM input ยาวเกิน (สำหรับ llama3.1:8b)
+FACTS_MAX_CHARS_PER_CALL = 4500
+
+_FACT_KEYWORDS = [
+    # Thai business/fiscal
+    "รายได้", "กำไร", "ขาดทุน", "ยอดขาย", "มูลค่า", "งบ", "สัดส่วน", "เติบโต", "อัตรา", "ร้อยละ", "เปอร์เซ็นต์",
+    "ล้าน", "พันล้าน", "บาท", "ปี", "ไตรมาส", "yoy", "qoq",
+    # English business/fiscal
+    "revenue", "profit", "loss", "sales", "earnings", "growth", "percent", "market", "budget", "cost",
+]
+
+
+def _fact_chunk_score(t: str) -> float:
+    """
+    ให้คะแนน chunk เพื่อเลือก top chunks ที่เหมาะกับการ extract facts
+    heuristic เน้น:
+    - มีตัวเลข/ปี/%/เงิน
+    - มีคำสำคัญด้านธุรกิจ
+    - ความยาวพอเหมาะ (ยาวพอมีสาระ)
+    """
+    if not t:
+        return 0.0
+    s = t.lower()
+    digits = len(re.findall(r"\d", s))
+    perc = len(re.findall(r"%|เปอร์เซ็นต์|ร้อยละ", s))
+    money = len(re.findall(r"บาท|ล้าน|พันล้าน|million|billion|usd|thb", s))
+    year = len(re.findall(r"\b20\d{2}\b|ปี\s*20\d{2}|พ\.ศ\.\s*\d{4}", s))
+    kw = sum(1 for k in _FACT_KEYWORDS if k.lower() in s)
+
+    # base length (cap เพื่อไม่ให้ chunk ยักษ์ชนะเสมอ)
+    length_score = min(len(t), 2000) / 2000.0
+
+    return (
+        length_score * 2.0
+        + digits * 0.15
+        + perc * 2.0
+        + money * 1.5
+        + year * 2.0
+        + kw * 1.2
+    )
+
+
+def _select_top_fact_chunks(chunks: List[str], top_k: int = FACTS_TOP_K) -> List[str]:
+    """
+    เลือก top chunks สำหรับ extract facts
+    - ตัด chunk ที่สั้นเกิน
+    - เรียงตาม heuristic score
+    """
+    cleaned: List[str] = []
+    for c in chunks:
+        c = (c or "").strip()
+        if len(c) < FACTS_MIN_CHARS:
+            continue
+        cleaned.append(c)
+
+    if not cleaned:
+        return []
+
+    ranked = sorted(cleaned, key=_fact_chunk_score, reverse=True)
+    return ranked[: max(1, int(top_k))]
+
+
+def _clip_for_facts(text: str, max_chars: int = FACTS_MAX_CHARS_PER_CALL) -> str:
+    """
+    กัน LLM context overflow:
+    - "clip" เฉพาะตอนส่งเข้า LLM (ไม่ได้ clip ตอน ingest embeddings)
+    - คลิปนี้ไม่กระทบการเก็บข้อมูลใน RAG chunks เพราะเราเก็บครบแล้ว
+    """
+    t = (text or "").strip()
+    if len(t) <= max_chars:
+        return t
+    return t[:max_chars].rstrip()
+
+
+def _dedupe_facts(facts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    ลบซ้ำ facts แบบอนุรักษ์นิยม:
+    ใช้ (entity, key, value, year, unit) เป็นคีย์
+    """
+    seen = set()
+    out: List[Dict[str, Any]] = []
+    for f in facts or []:
+        entity = str(f.get("entity") or "").strip().lower()
+        key = str(f.get("key") or "").strip().lower()
+        value = str(f.get("value") or "").strip().lower()
+        year = int(f.get("year") or 0)
+        unit = str(f.get("unit") or "").strip().lower()
+        sig = (entity, key, value, year, unit)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(f)
+    return out
+
+
+async def _extract_facts_from_chunks(
+    chunks_for_facts: List[str],
+    entity_hint: str,
+) -> List[Dict[str, Any]]:
+    """
+    extract facts ทีละ chunk (หลีกเลี่ยงส่ง text ยาวเกิน)
+    ทำแบบ async + จำกัด concurrency
+    """
+    sem = asyncio.Semaphore(FACTS_MAX_CONCURRENCY)
+
+    async def _one(c: str) -> List[Dict[str, Any]]:
+        c = _clip_for_facts(c, FACTS_MAX_CHARS_PER_CALL)
+        if len(c) < FACTS_MIN_CHARS:
+            return []
+        async with sem:
+            try:
+                return await extract_facts_llm(c, entity_hint=entity_hint)
+            except Exception:
+                return []
+
+    tasks = [_one(c) for c in (chunks_for_facts or [])]
+    if not tasks:
+        return []
+
+    results = await asyncio.gather(*tasks)
+    merged: List[Dict[str, Any]] = []
+    for arr in results:
+        if arr:
+            merged.extend(arr)
+
+    return _dedupe_facts(merged)
+
+
+# ============================
+# Ingest main functions
+# ============================
+async def ingest_text_blob(
+    store: RAGStore,
+    namespace: str,
+    text: str,
+    meta: Dict[str, Any],
+    entity_hint: str,
+) -> Dict[str, int]:
+    """
+    Ingest "text blob" เข้าระบบ RAG:
+    1) normalize text
+    2) chunk_text -> ensure embed safe (split เพิ่มถ้า chunk ใหญ่เกิน)
+    3) upsert chunks + embeddings
+    4) extract facts แบบไม่ส่งก้อนยักษ์:
+       - เลือก top chunks แล้ว extract ทีละ chunk (หรือถ้าเป็นหน้า pdf ก็ถือว่าเล็กอยู่แล้ว)
+    """
+    text = normalize_text(text)
+    if len(text) < 30:
+        return {"chunks": 0, "facts": 0}
+
+    # --------- 1) chunks for embeddings (keep ALL content, no truncate) ---------
+    chunks = chunk_text(text)
+    chunks = _ensure_embed_safe_chunks(chunks, max_chars=EMBED_MAX_CHARS)
+
+    metas: List[Dict[str, Any]] = []
+    total = len(chunks)
+    for idx, _ in enumerate(chunks, start=1):
+        m = dict(meta)
+        m["chunk_index"] = idx
+        m["chunk_total"] = total
+        metas.append(m)
+
+    added_chunks = await store.upsert_chunks(namespace, chunks, metas)
+
+    # --------- 2) facts extraction (avoid huge context) ---------
+    # policy:
+    # - pdf_page: โดยธรรมชาติเล็กอยู่แล้ว -> extract จากหน้าเดียวได้
+    # - web_page / long blob: extract จาก top chunks
+    source_type = (meta.get("source_type") or "").strip().lower()
+
+    facts: List[Dict[str, Any]] = []
+    try:
+        if source_type in ("pdf_page", "pdf_figure_ocr"):
+            # โดยปกติข้อความต่อหน้าไม่ยาวมาก
+            clipped = _clip_for_facts(text, FACTS_MAX_CHARS_PER_CALL)
+            facts = await extract_facts_llm(clipped, entity_hint=entity_hint)
+            facts = _dedupe_facts(facts or [])
+        else:
+            # web_page, image captions, อื่น ๆ: เลือก top chunks แล้วค่อย extract ทีละ chunk
+            # (ใช้ chunks หลัง ensure_embed_safe แล้ว เพื่อไม่ให้บาง chunk ยาวเกิน)
+            top_chunks = _select_top_fact_chunks(chunks, top_k=FACTS_TOP_K)
+            facts = await _extract_facts_from_chunks(top_chunks, entity_hint=entity_hint)
+    except Exception:
+        facts = []
+
+    added_facts = 0
+    if facts:
+        added_facts = await store.upsert_facts(namespace, facts, meta)
+
+    return {"chunks": added_chunks, "facts": added_facts}
+
+
+async def ingest_site_folder(store: RAGStore, namespace: str, site_folder: str) -> Dict[str, Any]:
+    total_chunks = total_facts = skipped = 0
+
+    # ---------------------------
+    # Web page content
+    # ---------------------------
+    content_path = os.path.join(site_folder, "content.txt")
+    if os.path.exists(content_path):
+        text = open(content_path, "r", encoding="utf-8", errors="ignore").read()
+        r = await ingest_text_blob(
+            store,
+            namespace,
+            text,
+            {
+                "source_type": "web_page",
+                "source_path": content_path,
+                "source_url": "",
+                "page": 0,
+            },
+            entity_hint="web_page",
+        )
+        total_chunks += r["chunks"]
+        total_facts += r["facts"]
+
+    # ---------------------------
+    # Image understanding captions (already short)
+    # ---------------------------
+    under_path = os.path.join(site_folder, "images_understanding.jsonl")
+    for obj in iter_jsonl(under_path) or []:
+        if obj.get("type") != "image_understanding":
+            continue
+        if obj.get("is_duplicate"):
+            continue
+        if not obj.get("keep_for_rag"):
+            continue
+
+        cap_th = (obj.get("caption_th") or "").strip()
+        cap_en = (obj.get("caption_en") or "").strip()
+        image_type = (obj.get("image_type") or "other").strip()
+        rel = float(obj.get("relevance_score") or 0.0)
+
+        text = "\n".join(
+            [
+                f"caption_th: {cap_th}",
+                f"caption_en: {cap_en}",
+                f"image_type: {image_type}",
+                f"relevance_score: {rel}",
+            ]
+        ).strip()
+
+        if not text:
+            skipped += 1
+            continue
+
+        r = await ingest_text_blob(
+            store,
+            namespace,
+            text,
+            {
+                "source_type": "web_image_caption",
+                "source_path": obj.get("image_path") or "",
+                "page": 0,
+                "relevance_score": rel,
+                "image_type": image_type,
+            },
+            entity_hint="image",
+        )
+        total_chunks += r["chunks"]
+        total_facts += r["facts"]
+
+    return {"site_folder": site_folder, "chunks": total_chunks, "facts": total_facts, "skipped": skipped}
+
+
+async def ingest_main_folder(store: RAGStore, namespace: str, main_folder: str) -> Dict[str, Any]:
+    total_chunks = total_facts = skipped = 0
+
+    # ---------------------------
+    # Each site folder
+    # ---------------------------
+    for name in sorted(os.listdir(main_folder)):
+        site_folder = os.path.join(main_folder, name)
+        if not os.path.isdir(site_folder):
+            continue
+        if not (name[:1].isdigit() and "_" in name):
+            continue
+
+        r = await ingest_site_folder(store, namespace, site_folder)
+        total_chunks += r["chunks"]
+        total_facts += r["facts"]
+        skipped += r["skipped"]
+
+    # ---------------------------
+    # OCR results (per page already)
+    # ---------------------------
+    ocr_root = os.path.join(main_folder, "ocr_results")
+    if os.path.isdir(ocr_root):
+        for d in sorted(os.listdir(ocr_root)):
+            pdf_dir = os.path.join(ocr_root, d)
+            if not os.path.isdir(pdf_dir):
+                continue
+
+            docs_jsonl = os.path.join(pdf_dir, "docs.jsonl")
+            for obj in iter_jsonl(docs_jsonl) or []:
+                if obj.get("type") == "page_text":
+                    r = await ingest_text_blob(
+                        store,
+                        namespace,
+                        obj.get("text") or "",
+                        {
+                            "source_type": "pdf_page",
+                            "source_path": obj.get("source_pdf") or "",
+                            "page": int(obj.get("page") or 0),
+                            "extract_method": obj.get("extract_method") or "",
+                        },
+                        entity_hint="pdf",
+                    )
+                    total_chunks += r["chunks"]
+                    total_facts += r["facts"]
+
+                elif obj.get("type") == "figure":
+                    img_ocr = (obj.get("image_ocr") or "").strip()
+                    if len(img_ocr) >= 10:
+                        r = await ingest_text_blob(
+                            store,
+                            namespace,
+                            img_ocr,
+                            {
+                                "source_type": "pdf_figure_ocr",
+                                "source_path": obj.get("image_path") or "",
+                                "page": int(obj.get("page") or 0),
+                            },
+                            entity_hint="pdf_figure",
+                        )
+                        total_chunks += r["chunks"]
+                        total_facts += r["facts"]
+                    else:
+                        skipped += 1
+
+    return {
+        "namespace": namespace,
+        "folder": main_folder,
+        "added_chunks": total_chunks,
+        "added_facts": total_facts,
+        "skipped": skipped,
+    }
+
+==================================================================================================
+
+11.) rag_store.py:
+# backend/rag/rag_store.py
+from __future__ import annotations
+
+import hashlib
+import asyncio
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+import httpx
+from sqlalchemy import String, Integer, Float, Text, select, insert, delete, Index
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import declarative_base, mapped_column, Mapped, sessionmaker
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import text as sql_text
+
+from backend.settings import settings
+
+Base = declarative_base()
+
+
+def sha1_text(s: str) -> str:
+    return hashlib.sha1((s or "").encode("utf-8", errors="ignore")).hexdigest()
+
+
+class OllamaEmbedder:
+    def __init__(self, host: str, model: str, timeout_s: int = 60, max_concurrency: int = 4):
+        self.host = host.rstrip("/")
+        self.model = model
+        self.timeout_s = timeout_s
+        self.max_concurrency = max(1, int(max_concurrency))
+
+    async def embed_one(self, text: str) -> List[float]:
+        payload = {"model": self.model, "prompt": text}
+        timeout = httpx.Timeout(self.timeout_s)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{self.host}/api/embeddings", json=payload)
+        if r.status_code != 200:
+            raise RuntimeError(f"Ollama embeddings failed: {r.status_code} {r.text[:200]}")
+        data = r.json()
+        emb = data.get("embedding")
+        if not isinstance(emb, list):
+            raise RuntimeError("Ollama embeddings invalid response")
+        return [float(x) for x in emb]
+
+    async def embed_many(self, texts: List[str]) -> List[List[float]]:
+        sem = asyncio.Semaphore(self.max_concurrency)
+
+        async def _one(t: str) -> List[float]:
+            async with sem:
+                return await self.embed_one(t)
+
+        return await asyncio.gather(*[_one(t) for t in texts])
+
+
+class RAGChunk(Base):
+    __tablename__ = "rag_chunks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(32), index=True)     # external / internal
+    source_type: Mapped[str] = mapped_column(String(64), index=True)
+    source_url: Mapped[str] = mapped_column(Text, default="")
+    source_path: Mapped[str] = mapped_column(Text, default="")
+    page: Mapped[int] = mapped_column(Integer, default=0)
+    chunk_index: Mapped[int] = mapped_column(Integer, default=1)
+    chunk_total: Mapped[int] = mapped_column(Integer, default=1)
+    text: Mapped[str] = mapped_column(Text)
+
+    # ✅ dim ตาม settings (ถ้าเปลี่ยน dim ต้อง reset/migrate DB)
+    embedding: Mapped[Any] = mapped_column(Vector(int(settings.EMBED_DIMS)))
+    score_hint: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+Index("ix_rag_chunks_namespace_source", RAGChunk.namespace, RAGChunk.source_type)
+
+
+class RAGFact(Base):
+    __tablename__ = "rag_facts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(32), index=True)     # external / internal
+    entity: Mapped[str] = mapped_column(String(256), index=True)
+    key: Mapped[str] = mapped_column(String(128), index=True)
+    value: Mapped[str] = mapped_column(String(512))
+    unit: Mapped[str] = mapped_column(String(64), default="")
+    year: Mapped[int] = mapped_column(Integer, default=0)
+    source_type: Mapped[str] = mapped_column(String(64), default="")
+    source_path: Mapped[str] = mapped_column(Text, default="")
+    page: Mapped[int] = mapped_column(Integer, default=0)
+    evidence_text: Mapped[str] = mapped_column(Text, default="")
+
+
+Index("ix_rag_facts_namespace_key", RAGFact.namespace, RAGFact.key)
+
+
+@dataclass
+class RetrievedChunk:
+    text: str
+    score: float
+    meta: Dict[str, Any]
+
+
+class RAGStore:
+    def __init__(self, database_url: str, ollama_host: str, embed_model: str, embed_dims: int = 768):
+        self.database_url = database_url
+        self.engine = create_async_engine(database_url, echo=False, future=True)
+        self.SessionLocal = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
+        self.embedder = OllamaEmbedder(host=ollama_host, model=embed_model)
+        self.embed_dims = embed_dims
+
+    async def init_db(self) -> None:
+        async with self.engine.begin() as conn:
+            await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def reset_db(self) -> None:
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def upsert_chunks(self, namespace: str, chunks: List[str], metas: List[Dict[str, Any]]) -> int:
+        if not chunks:
+            return 0
+
+        embs = await self.embedder.embed_many(chunks)
+
+        rows = []
+        for t, m, e in zip(chunks, metas, embs):
+            source_key = f"{namespace}|{m.get('source_type','')}|{m.get('source_url','')}|{m.get('source_path','')}|{m.get('page','')}|{m.get('chunk_index','')}"
+            rid = sha1_text(source_key + "|" + t)
+            rows.append({
+                "id": rid,
+                "namespace": namespace,
+                "source_type": m.get("source_type", ""),
+                "source_url": m.get("source_url", ""),
+                "source_path": m.get("source_path", ""),
+                "page": int(m.get("page") or 0),
+                "chunk_index": int(m.get("chunk_index") or 1),
+                "chunk_total": int(m.get("chunk_total") or 1),
+                "text": t,
+                "embedding": e,
+                "score_hint": float(m.get("relevance_score") or 0.0),
+            })
+
+        async with self.SessionLocal() as db:
+            ids = [r["id"] for r in rows]
+            await db.execute(delete(RAGChunk).where(RAGChunk.id.in_(ids)))
+            await db.execute(insert(RAGChunk), rows)
+            await db.commit()
+        return len(rows)
+
+    async def upsert_facts(self, namespace: str, facts: List[Dict[str, Any]], meta: Dict[str, Any]) -> int:
+        if not facts:
+            return 0
+        rows = []
+        for f in facts:
+            key = f"{namespace}|{f.get('entity','')}|{f.get('key','')}|{f.get('value','')}|{f.get('year',0)}|{meta.get('source_path','')}|{meta.get('page',0)}"
+            rid = sha1_text(key)
+            rows.append({
+                "id": rid,
+                "namespace": namespace,
+                "entity": f.get("entity", "unknown"),
+                "key": f.get("key", ""),
+                "value": str(f.get("value", "")),
+                "unit": f.get("unit", ""),
+                "year": int(f.get("year") or 0),
+                "source_type": meta.get("source_type", ""),
+                "source_path": meta.get("source_path", ""),
+                "page": int(meta.get("page") or 0),
+                "evidence_text": f.get("evidence_text", ""),
+            })
+
+        async with self.SessionLocal() as db:
+            ids = [r["id"] for r in rows]
+            await db.execute(delete(RAGFact).where(RAGFact.id.in_(ids)))
+            await db.execute(insert(RAGFact), rows)
+            await db.commit()
+        return len(rows)
+
+    async def query_semantic(self, namespace: str, question: str, top_k: int = 8) -> List[RetrievedChunk]:
+        q_emb = await self.embedder.embed_one(question)
+
+        dist_expr = RAGChunk.embedding.l2_distance(q_emb)
+
+        async with self.SessionLocal() as db:
+            stmt = (
+                select(RAGChunk, dist_expr.label("dist"))
+                .where(RAGChunk.namespace == namespace)
+                .order_by(dist_expr)  # ✅ ชัวร์กว่า order_by("dist")
+                .limit(top_k)
+            )
+            res = await db.execute(stmt)
+            rows = res.all()
+
+        out: List[RetrievedChunk] = []
+        for row in rows:
+            ch: RAGChunk = row[0]
+            dist = float(row[1]) if row[1] is not None else 999.0
+            score = float(1.0 / (1.0 + dist))
+            out.append(RetrievedChunk(
+                text=ch.text or "",
+                score=score,
+                meta={
+                    "namespace": ch.namespace,
+                    "source_type": ch.source_type,
+                    "source_url": ch.source_url,
+                    "source_path": ch.source_path,
+                    "page": ch.page,
+                    "chunk_index": ch.chunk_index,
+                    "chunk_total": ch.chunk_total,
+                    "score": score,
+                }
+            ))
+        return out
+
+    async def query_structured(self, namespace: str, key: str, limit: int = 30) -> List[Dict[str, Any]]:
+        async with self.SessionLocal() as db:
+            stmt = select(RAGFact).where(RAGFact.namespace == namespace, RAGFact.key == key).limit(limit)
+            res = await db.execute(stmt)
+            facts = [r[0] for r in res.all()]
+
+        out = []
+        for f in facts:
+            out.append({
+                "namespace": f.namespace,
+                "entity": f.entity,
+                "key": f.key,
+                "value": f.value,
+                "unit": f.unit,
+                "year": f.year,
+                "source_path": f.source_path,
+                "page": f.page,
+                "evidence_text": f.evidence_text,
+            })
+        return out
+
+    async def preview_chunks(self, namespace: str, source_type: str = "", limit: int = 30) -> List[Dict[str, Any]]:
+        async with self.SessionLocal() as db:
+            stmt = select(RAGChunk).where(RAGChunk.namespace == namespace)
+            if source_type:
+                stmt = stmt.where(RAGChunk.source_type == source_type)
+            stmt = stmt.order_by(RAGChunk.source_type, RAGChunk.source_path, RAGChunk.page).limit(limit)
+            res = await db.execute(stmt)
+            rows = [r[0] for r in res.all()]
+
+        return [{
+            "id": c.id,
+            "namespace": c.namespace,
+            "source_type": c.source_type,
+            "source_path": c.source_path,
+            "page": c.page,
+            "chunk_index": c.chunk_index,
+            "chunk_total": c.chunk_total,
+            "text_preview": (c.text or "")[:260],
+        } for c in rows]
+
+==================================================================================================
+
+12.) structured_extractor.py:
+
+# backend/rag/structured_extractor.py
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Dict, List
+
+import httpx
+
+from backend.settings import settings
+from backend.utils.text import normalize_text
+
+
+def _safe_json_parse(s: str) -> Dict[str, Any]:
+    s = (s or "").strip()
+    if not s:
+        return {}
+    s = re.sub(r"^```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s)
+    if not (s.startswith("{") and s.endswith("}")):
+        m = re.search(r"\{.*\}", s, flags=re.DOTALL)
+        if m:
+            s = m.group(0)
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+class OllamaLLM:
+    def __init__(self, host: str, model: str, timeout_s: int = 120):
+        self.host = host.rstrip("/")
+        self.model = model
+        self.timeout_s = timeout_s
+
+    async def generate(self, prompt: str) -> str:
+        payload = {"model": self.model, "prompt": prompt, "stream": False}
+        timeout = httpx.Timeout(self.timeout_s)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{self.host}/api/generate", json=payload)
+        if r.status_code != 200:
+            raise RuntimeError(f"Ollama generate failed: {r.status_code} {r.text[:200]}")
+        data = r.json()
+        return (data.get("response") or "").strip()
+
+
+EXTRACT_PROMPT = """You are an information extraction system.
+Extract structured business facts from the given text.
+
+Return STRICT JSON with this schema:
+{{
+  "entity_hint": "<string>",
+  "facts": [
+    {{
+      "entity": "<string>",
+      "key": "<string>",
+      "value": "<string>",
+      "unit": "<string>",
+      "year": <int>,
+      "evidence_text": "<string up to 250 chars>"
+    }}
+  ]
+}}
+
+Rules:
+- Only output JSON. No markdown.
+- If no facts found, return {{"entity_hint":"...","facts":[]}}
+- Prefer Thai keys? NO: use canonical English keys.
+- evidence_text must be a direct excerpt from the input (short).
+
+ENTITY HINT:
+{entity_hint}
+
+TEXT:
+{text}
+"""
+
+
+
+async def extract_facts_llm(text: str, entity_hint: str = "unknown") -> List[Dict[str, Any]]:
+    """
+    ✅ async + กัน hallucination:
+    - evidence_text ต้องเป็น substring ของ input จริง (ไม่ใช่ทิ้ง fact)
+    """
+    t = normalize_text(text)
+    if len(t) < 50:
+        return []
+
+    llm = OllamaLLM(settings.OLLAMA_HOST, settings.OLLAMA_LLM_MODEL)
+    prompt = EXTRACT_PROMPT.format(entity_hint=entity_hint, text=t[:6000])
+
+    try:
+        out = await llm.generate(prompt)
+        obj = _safe_json_parse(out)
+        facts = obj.get("facts") if isinstance(obj, dict) else None
+        if not isinstance(facts, list):
+            return []
+
+        cleaned: List[Dict[str, Any]] = []
+        for f in facts:
+            if not isinstance(f, dict):
+                continue
+
+            key = str(f.get("key", "")).strip()
+            val = str(f.get("value", "")).strip()
+            if not key or not val:
+                continue
+
+            ev = str(f.get("evidence_text") or "")[:250]
+            # ✅ evidence ต้องอยู่ใน input จริง
+            if ev and ev not in t:
+                continue
+
+            cleaned.append({
+                "entity": str(f.get("entity") or entity_hint),
+                "key": key,
+                "value": val,
+                "unit": str(f.get("unit") or ""),
+                "year": int(f.get("year") or 0),
+                "evidence_text": ev,
+            })
+        return cleaned
+    except Exception:
+        return []
+
+==================================================================================================
+
+13.) report.py:
+# backend/report_utils/report.py
+from __future__ import annotations
+
+import os
+from typing import Any, Dict, List
+
+def _count_jsonl(path: str) -> int:
+    if not path or not os.path.exists(path):
+        return 0
+    n = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                n += 1
+    return n
+
+def generate_report_md(main_folder: str, summary: Dict[str, Any]) -> str:
+    report_path = os.path.join(main_folder, "report.md")
+    lines: List[str] = []
+    lines.append("# Pipeline Report\n\n")
+    lines.append(f"- main_folder: `{main_folder}`\n")
+    for k, v in summary.items():
+        lines.append(f"- {k}: `{v}`\n")
+
+    lines.append("\n## Folders\n")
+    for name in sorted(os.listdir(main_folder)):
+        p = os.path.join(main_folder, name)
+        if os.path.isdir(p):
+            lines.append(f"- `{name}/`\n")
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    return report_path
+
+==================================================================================================
+
+14.) facebook_scraping.py:
+# backend/scraping/facebook_scraping.py
+from __future__ import annotations
+
+import os
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, List
+from urllib.parse import urlparse
+
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+
+from backend.settings import settings
+from backend.utils.job_manager import log
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+@dataclass
+class FacebookSession:
+    storage_state_path: str
+
+def _ensure_dir(path: str) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+def ensure_logged_in(job_id: str, headless: bool = True) -> FacebookSession:
+    """
+    Login แล้ว save storage_state ไว้ reuse session ครั้งถัดไป
+    - ถ้ามี storage_state อยู่แล้ว จะลองเปิด Facebook แล้วตรวจว่าล็อกอินอยู่ไหม
+    - ถ้าไม่อยู่ จะทำ login ใหม่ แล้ว save state
+    """
+    storage = settings.FB_STORAGE_STATE_PATH
+    _ensure_dir(storage)
+
+    if not settings.FB_EMAIL or not settings.FB_PASS:
+        raise RuntimeError("FB_EMAIL/FB_PASS missing in .env")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        ctx = browser.new_context(
+            user_agent=USER_AGENT,
+            storage_state=storage if os.path.exists(storage) else None
+        )
+        page = ctx.new_page()
+
+        log(job_id, "info", "Opening facebook.com to verify session...")
+        page.goto("https://www.facebook.com/", timeout=60_000)
+        time.sleep(2)
+
+        if _is_logged_in(page):
+            log(job_id, "info", "Facebook session is already logged in (reuse).")
+            ctx.storage_state(path=storage)
+            ctx.close()
+            browser.close()
+            return FacebookSession(storage_state_path=storage)
+
+        log(job_id, "warn", "Session not logged in. Performing login...")
+        _do_login(job_id, page)
+
+        ctx.storage_state(path=storage)
+        log(job_id, "info", f"Saved storage_state: {storage}")
+
+        ctx.close()
+        browser.close()
+        return FacebookSession(storage_state_path=storage)
+
+def _is_logged_in(page) -> bool:
+    # heuristic: presence of profile/menu or absence of login form
+    html = page.content().lower()
+    if "name=\"email\"" in html and "name=\"pass\"" in html:
+        return False
+    # sometimes FB loads minimal; try check for "home.php" redirect or "logout"
+    if "logout" in html or "home.php" in page.url:
+        return True
+    # fallback: check for cookie presence via JS
+    try:
+        cookies = page.context.cookies()
+        return any(c.get("name") in ("c_user", "xs") for c in cookies)
+    except Exception:
+        return False
+
+def _do_login(job_id: str, page) -> None:
+    page.goto("https://www.facebook.com/login", timeout=60_000)
+    time.sleep(2)
+
+    try:
+        page.fill("input[name='email']", settings.FB_EMAIL, timeout=10_000)
+        page.fill("input[name='pass']", settings.FB_PASS, timeout=10_000)
+        page.click("button[name='login']", timeout=10_000)
+    except PWTimeoutError:
+        raise RuntimeError("Facebook login page selectors not found (page changed or blocked).")
+
+    # wait navigation / checkpoint
+    time.sleep(4)
+    page.wait_for_load_state("networkidle", timeout=60_000)
+
+    # If checkpoint/2FA, user must resolve manually (but we keep browser state)
+    url = page.url.lower()
+    if "checkpoint" in url or "two_factor" in url or "security" in url:
+        log(job_id, "warn", f"Facebook requires extra verification at: {page.url}")
+        # We do not hard-fail; allow user to do manual step if headless=False
+        if page.context.browser.is_connected():
+            pass
+
+    if not _is_logged_in(page):
+        raise RuntimeError("Facebook login failed (still not logged in). Consider headless=False for first login.")
+
+def scrape_facebook_post_html(job_id: str, post_url: str, headless: bool = True) -> Dict[str, Any]:
+    """
+    เปิด post/page URL ด้วย session แล้วคืน html + final_url
+    """
+    sess = ensure_logged_in(job_id, headless=headless)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        ctx = browser.new_context(user_agent=USER_AGENT, storage_state=sess.storage_state_path)
+        page = ctx.new_page()
+
+        log(job_id, "info", f"Opening FB URL: {post_url}")
+        page.goto(post_url, timeout=60_000)
+        page.wait_for_load_state("networkidle", timeout=60_000)
+        time.sleep(2)
+
+        html = page.content()
+        final_url = page.url
+
+        ctx.close()
+        browser.close()
+
+    return {"final_url": final_url, "html": html}
+
+def scrape_facebook_group_search(job_id: str, group_url: str, keyword: str, headless: bool = True) -> Dict[str, Any]:
+    """
+    Example: search within group/page by keyword (basic). Returns html snapshot.
+    """
+    sess = ensure_logged_in(job_id, headless=headless)
+    q = keyword.strip()
+    search_url = f"{group_url.rstrip('/')}/search/?q={q}"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        ctx = browser.new_context(user_agent=USER_AGENT, storage_state=sess.storage_state_path)
+        page = ctx.new_page()
+
+        log(job_id, "info", f"Opening FB search: {search_url}")
+        page.goto(search_url, timeout=60_000)
+        page.wait_for_load_state("networkidle", timeout=60_000)
+        time.sleep(2)
+
+        html = page.content()
+        final_url = page.url
+
+        ctx.close()
+        browser.close()
+
+    return {"final_url": final_url, "html": html}
+
+==================================================================================================
+
+15.) recaptcha_solver.py:
+# backend/scraping/recaptcha_solver.py
+import os
+import random
+import time
+import requests
+from typing import Optional
+
+# 3rd party
+import pydub
+import speech_recognition as sr
+from playwright.sync_api import Page, FrameLocator, sync_playwright
+
+# --- ตั้งค่า FFmpeg ---
+# (เหมือนเดิม: เช็คไฟล์ใน folder ปัจจุบันก่อน ถ้าไม่มีให้ใช้จาก system path)
+if os.name == 'nt':
+    if os.path.exists("ffmpeg.exe"):
+        pydub.AudioSegment.converter = os.path.abspath("ffmpeg.exe")
+        pydub.AudioSegment.ffprobe = os.path.abspath("ffprobe.exe")
+    else:
+        pydub.AudioSegment.converter = "ffmpeg"
+        pydub.AudioSegment.ffprobe = "ffprobe"
+
+class RecaptchaSolver:
+    """
+    Advanced Audio ReCaptcha Solver using Playwright
+    Features: Request-based download, Human-like typing, Retry logic
+    """
+
+    TEMP_DIR = os.getenv("TEMP") if os.name == "nt" else "/tmp"
+
+    def __init__(self, page: Page) -> None:
+        """
+        :param page: Playwright Page object
+        """
+        self.page = page
+        self.recognizer = sr.Recognizer()
+
+    def solveCaptcha(self, max_retries: int = 3) -> bool:
+        """
+        Main method to solve captcha with retries.
+        Returns: True if solved, False otherwise.
+        """
+        print("[Solver] Looking for ReCAPTCHA...")
+
+        # 1. เช็คว่ามี Captcha ไหม (รอสูงสุด 3 วินาที)
+        try:
+            # ReCAPTCHA มักจะอยู่ใน Iframe ที่มี title="reCAPTCHA"
+            self.page.wait_for_selector('iframe[title="reCAPTCHA"]', state='attached', timeout=3000)
+        except:
+            print("[Solver] No ReCAPTCHA found.")
+            return True # ถือว่าไม่มี Captcha ให้ผ่านไป
+
+        # ตัวจัดการ Iframe หลัก (Checkbox)
+        frame_main = self.page.frame_locator('iframe[title="reCAPTCHA"]')
+
+        # 2. คลิก Checkbox
+        try:
+            # หา Element กล่อง Checkbox
+            checkbox = frame_main.locator(".recaptcha-checkbox-border")
+            
+            # ขยับเมาส์ไปที่กล่องก่อนคลิก (เนียน)
+            if checkbox.is_visible():
+                checkbox.hover()
+                time.sleep(random.uniform(0.3, 0.7))
+                checkbox.click()
+                time.sleep(1)
+            else:
+                print("[Solver] Checkbox not visible, skipping click.")
+        except Exception as e:
+            print(f"[Solver] Error clicking checkbox: {e}")
+
+        # 3. ตรวจสอบว่าผ่านเลยไหม (ไม่ต้องแก้รูป/เสียง)
+        if self.is_solved():
+            print("[Solver] Solved by click!")
+            return True
+
+        # 4. เริ่มกระบวนการแก้ Audio (วนลูปตามจำนวน max_retries)
+        print("[Solver] Click failed. Starting Audio Challenge...")
+
+        # ตัวจัดการ Iframe Challenge (Popup รูป/เสียง)
+        # URL มักจะมีคำว่า bframe หรือ title มีคำว่า challenge
+        frame_challenge = self.page.frame_locator('iframe[src*="bframe"]')
+
+        # กดปุ่ม Audio
+        try:
+            btn_audio = frame_challenge.locator("#recaptcha-audio-button")
+            btn_audio.wait_for(state="visible", timeout=5000)
+            btn_audio.click()
+            time.sleep(1.5)
+        except Exception:
+            print("[Solver] Could not click Audio button (Maybe blocked or network lag).")
+            return False
+
+        # วนลูปแก้
+        for attempt in range(1, max_retries + 1):
+            print(f"[Solver] Audio Attempt {attempt}/{max_retries}")
+
+            # เช็คว่าโดนบล็อคไหม
+            if self.is_detected(frame_challenge):
+                print("[Solver] ❌ BLOCKED: 'Try again later'. Change IP or wait.")
+                return False
+
+            try:
+                # หา URL ไฟล์เสียง
+                audio_source = frame_challenge.locator("#audio-source")
+                audio_source.wait_for(state="attached", timeout=5000)
+                src = audio_source.get_attribute("src")
+
+                if not src:
+                    raise Exception("No audio source found")
+
+                # ดาวน์โหลดและแปลงเสียง
+                text = self._audio_to_text(src)
+                print(f"[Solver] Heard: '{text}'")
+
+                if not text:
+                    raise Exception("Empty text recognized")
+
+                # พิมพ์ตอบ (แบบคนพิมพ์ ทีละตัวอักษร)
+                input_box = frame_challenge.locator("#audio-response")
+                input_box.clear()
+                
+                # จำลองการพิมพ์ทีละตัว
+                for char in text.lower():
+                    input_box.type(char, delay=random.randint(50, 200)) 
+                    # Playwright มี delay ใน type ได้เลย หรือจะใช้ loop sleep เองก็ได้
+                
+                time.sleep(0.5)
+
+                # กด Verify
+                verify_btn = frame_challenge.locator("#recaptcha-verify-button")
+                verify_btn.click()
+                time.sleep(2)
+
+                # เช็คผลลัพธ์
+                if self.is_solved():
+                    print("[Solver] ✅ CAPTCHA SOLVED SUCCESSFULLY!")
+                    return True
+
+                # ถ้ายังไม่ผ่าน เช็ค Error Message
+                err_msg = frame_challenge.locator(".rc-audiochallenge-error-message")
+                if err_msg.is_visible() and err_msg.text_content():
+                    print(f"[Solver] Google said: {err_msg.text_content()}")
+
+                print("[Solver] Verify failed, clicking Reload for new audio...")
+                reload_btn = frame_challenge.locator("#recaptcha-reload-button")
+                if reload_btn.is_visible():
+                    reload_btn.click()
+                    time.sleep(2)
+
+            except Exception as e:
+                print(f"[Solver] Attempt failed: {e}")
+                # ถ้าเกิด Error ให้กด Reload แล้วลองใหม่
+                try:
+                    reload_btn = frame_challenge.locator("#recaptcha-reload-button")
+                    if reload_btn.is_visible():
+                        reload_btn.click()
+                        time.sleep(2)
+                except:
+                    pass
+
+        print("[Solver] ❌ Failed to solve after retries.")
+        return False
+
+    def _audio_to_text(self, url: str) -> Optional[str]:
+        """Download mp3, convert to wav, recognize text."""
+        mp3_path = os.path.join(self.TEMP_DIR, f"audio_{random.randint(1000,9999)}.mp3")
+        wav_path = os.path.join(self.TEMP_DIR, f"audio_{random.randint(1000,9999)}.wav")
+
+        try:
+            # ใช้ requests เหมือนเดิม ดีแล้ว
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://www.google.com/"
+            }
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                print(f"[Solver] Failed to download audio: status {resp.status_code}")
+                return None
+            
+            with open(mp3_path, "wb") as f:
+                f.write(resp.content)
+
+            # Convert
+            sound = pydub.AudioSegment.from_mp3(mp3_path)
+            sound.export(wav_path, format="wav")
+
+            # Recognize
+            with sr.AudioFile(wav_path) as source:
+                audio_data = self.recognizer.record(source)
+                try:
+                    text = self.recognizer.recognize_google(audio_data)
+                    return text
+                except sr.UnknownValueError:
+                    print("[Solver] Google Speech could not understand audio (Noise/Static)")
+                    return None
+                except sr.RequestError as e:
+                    print(f"[Solver] Google Speech API Error: {e}")
+                    return None
+
+        except Exception as e:
+            print(f"[Solver] Audio processing error: {e}")
+            return None
+        finally:
+            # Clean up
+            for p in [mp3_path, wav_path]:
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except:
+                        pass
+
+    def is_solved(self) -> bool:
+        """Check checkmark style in the main frame."""
+        try:
+            frame_main = self.page.frame_locator('iframe[title="reCAPTCHA"]')
+            # เช็คว่ามี class 'recaptcha-checkbox-checked' อยู่ที่ anchor หรือไม่
+            # หรือเช็คว่า hidden token มีค่าแล้ว
+            
+            # วิธีที่ 1: เช็คเครื่องหมายถูก
+            checkmark = frame_main.locator(".recaptcha-checkbox-checkmark")
+            # ถ้า style เปลี่ยนหรือ class เปลี่ยน
+            # ใน Playwright เช็ค attribute ต้องใช้วิธี get_attribute
+            is_checked = frame_main.locator('.recaptcha-checkbox-checked').count() > 0
+            if is_checked:
+                return True
+                
+            # วิธีที่ 2: เช็ค attribute aria-checked ของ checkbox
+            checkbox = frame_main.locator("#recaptcha-anchor")
+            if checkbox.get_attribute("aria-checked") == "true":
+                return True
+
+            return False
+        except:
+            return False
+
+    def is_detected(self, frame_challenge: FrameLocator) -> bool:
+        """Check for 'Try again later' inside challenge frame."""
+        try:
+            # ใน Playwright ใช้ locator text=... ได้
+            if frame_challenge.locator("text=Try again later").is_visible():
+                return True
+            if frame_challenge.locator("text=Your computer or network may be sending automated queries").is_visible():
+                return True
+            return False
+        except:
+            return False
+
+# --- ตัวอย่างการเรียกใช้งาน (Example Usage) ---
+if __name__ == "__main__":
+    with sync_playwright() as p:
+        # เปิด Browser (ตั้งค่าให้เหมือนคนมากที่สุด)
+        browser = p.chromium.launch(headless=False, args=["--start-maximized"])
+        
+        # สร้าง Context พร้อม User Agent เพื่อความเนียน
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport=None # ให้ขยายตามหน้าต่าง
+        )
+        
+        page = context.new_page()
+
+        # ไปยังเว็บที่มี Captcha (ตัวอย่าง: Google Demo)
+        print("Opening Demo Page...")
+        page.goto("https://www.google.com/recaptcha/api2/demo")
+        
+        solver = RecaptchaSolver(page)
+        
+        # เรียกใช้ Solver
+        result = solver.solveCaptcha()
+        
+        if result:
+            print(">>> Main Script: Proceeding to submit form...")
+            # ทำงานต่อ... กดปุ่ม Submit ฯลฯ
+            # page.click("#submit-btn")
+        else:
+            print(">>> Main Script: Failed to solve.")
+
+        # รอให้ดูผลลัพธ์สักพัก
+        time.sleep(5)
+        browser.close()
+
+==================================================================================================
+
+16.) web_scraping.py:
+# backend/scraping/web_scraping.py
+from __future__ import annotations
+
+import os
+import re
+import io
+import time
+import random
+import hashlib
+import traceback
+import unicodedata
+import base64
+from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin, quote, urlparse, parse_qs, unquote, urlsplit
+
+import requests
+import pandas as pd
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+from PIL import Image
+
+from backend.settings import settings
+from backend.utils.text import normalize_text
+from backend.utils.jsonl import append_jsonl, safe_mkdir
+from backend.utils.job_manager import log
+from backend.scraping.recaptcha_solver import RecaptchaSolver
+
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+)
+
+BLOCK_KEYWORDS = [
+    "imperva", "security check", "hcaptcha", "verify you are human",
+    "access denied", "cloudflare", "captcha"
+]
+
+IGNORE_IMAGE_KEYWORDS = [
+    "logo", "icon", "sprite", "button", "spacer", "blank", "pixel",
+    "avatar", "badge", "placeholder"
+]
+
+ALLOWED_FILE_CT = {
+    "application/pdf": ".pdf",
+    "application/octet-stream": ".bin",
+    "application/zip": ".zip",
+    "application/x-zip-compressed": ".zip",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+}
+
+def _pick_best_from_srcset(srcset: str) -> str:
+    """
+    เลือก URL ที่ 'ใหญ่สุด' จาก srcset แบบง่าย ๆ
+    รูปแบบ: "url1 320w, url2 640w" หรือ "url1 1x, url2 2x"
+    """
+    if not srcset:
+        return ""
+    parts = [p.strip() for p in srcset.split(",") if p.strip()]
+    candidates = []
+    for p in parts:
+        toks = p.split()
+        if not toks:
+            continue
+        url = toks[0].strip()
+        score = 0.0
+        if len(toks) >= 2:
+            s = toks[1].strip().lower()
+            try:
+                if s.endswith("w"):
+                    score = float(s[:-1])
+                elif s.endswith("x"):
+                    score = float(s[:-1]) * 10000.0
+            except Exception:
+                score = 0.0
+        candidates.append((score, url))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+def _extract_bg_image_urls(style_text: str) -> List[str]:
+    """
+    ดึง url(...) จาก style background-image
+    """
+    if not style_text:
+        return []
+    # รองรับทั้ง url("...") url('...') url(...)
+    urls = re.findall(r'url\(\s*["\']?([^"\')]+)["\']?\s*\)', style_text, flags=re.IGNORECASE)
+    return [u.strip() for u in urls if u.strip()]
+
+
+def requests_get_with_retries(
+    session: requests.Session,
+    url: str,
+    headers: Dict[str, str],
+    timeout: int = 30,
+    max_retries: int = 3
+) -> Optional[requests.Response]:
+    """
+    GET แบบมี retry/backoff สำหรับ 403/429/5xx/timeout
+    """
+    last_exc = None
+    for i in range(max_retries):
+        try:
+            r = session.get(url, headers=headers, timeout=timeout, allow_redirects=True, stream=False)
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(1.0 + (i * 1.5) + random.uniform(0.0, 0.5))
+                continue
+            if r.status_code == 403:
+                # บางเว็บกัน hotlink: ลองพักแล้วค่อย retry
+                time.sleep(0.8 + random.uniform(0.0, 0.6))
+                continue
+            return r
+        except Exception as e:
+            last_exc = e
+            time.sleep(0.8 + (i * 1.2) + random.uniform(0.0, 0.4))
+    return None
+
+
+def _sha1_bytes(b: bytes) -> str:
+    return hashlib.sha1(b).hexdigest()
+
+
+def safe_filename(name: str, max_len: int = 60) -> str:
+    name = (name or "")
+    name = unicodedata.normalize("NFKC", name)
+    name = re.sub(r"[\\/*?\"<>|:]", "", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    name = name[:max_len].rstrip(" .").strip()
+    return name if name else "site"
+
+
+def is_probably_blocked(text: str) -> bool:
+    """
+    Heuristic ไม่ aggressive:
+    - ถ้ามี keyword captcha/denied ชัดเจน -> blocked
+    - ถ้า text สั้นมาก ไม่สรุปว่า blocked เสมอ (บางเพจสั้นจริง)
+    """
+    t = (text or "").lower().strip()
+    if any(k in t for k in BLOCK_KEYWORDS):
+        return True
+    return False
+
+
+def content_text_from_html(html: str) -> str:
+    soup = BeautifulSoup(html or "", "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg", "canvas"]):
+        tag.decompose()
+    for tag_name in ["header", "footer", "nav", "aside"]:
+        for t in soup.find_all(tag_name):
+            t.decompose()
+
+    main = soup.find("article") or soup.find("main") or soup.body
+    text = main.get_text("\n", strip=True) if main else soup.get_text("\n", strip=True)
+    return normalize_text(text)
+
+
+def extract_page_title(html: str) -> str:
+    soup = BeautifulSoup(html or "", "html.parser")
+    ogt = soup.find("meta", property="og:title")
+    if ogt and ogt.get("content"):
+        return ogt["content"].strip()
+    t = soup.find("title")
+    if t:
+        return t.get_text(" ", strip=True)
+    h1 = soup.find("h1")
+    return h1.get_text(" ", strip=True) if h1 else ""
+
+
+def looks_like_file_url(u: str) -> bool:
+    ul = (u or "").lower()
+    return any(x in ul for x in [".pdf", "getmedia", "download", "attachment", "file", "/getmedia/", ".pdf.aspx"])
+
+
+def extract_file_links(html: str, base_url: str) -> List[str]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    links: List[str] = []
+
+    for a in soup.find_all("a", href=True):
+        full = urljoin(base_url, a.get("href"))
+        if full.startswith("http") and looks_like_file_url(full):
+            links.append(full)
+
+    for tag in soup.select("[onclick]"):
+        onclick = tag.get("onclick") or ""
+        m = re.search(r"""['"]([^'"]+)['"]""", onclick)
+        if m:
+            full = urljoin(base_url, m.group(1))
+            if full.startswith("http") and looks_like_file_url(full):
+                links.append(full)
+
+    uniq, seen = [], set()
+    for u in links:
+        if u in seen:
+            continue
+        seen.add(u)
+        uniq.append(u)
+    return uniq
+
+
+def guess_ext_from_ct(ct: str) -> str:
+    ct = (ct or "").split(";")[0].strip().lower()
+    return ALLOWED_FILE_CT.get(ct, ".pdf" if "pdf" in ct else ".bin")
+
+
+def extract_image_candidates(html: str, base_url: str) -> List[Dict[str, Any]]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    items: List[Dict[str, Any]] = []
+
+    def get_nearby_text(img_tag) -> str:
+        texts = []
+        fig = img_tag.find_parent("figure")
+        if fig:
+            cap = fig.find("figcaption")
+            if cap:
+                texts.append(cap.get_text(" ", strip=True))
+            texts.append(fig.get_text(" ", strip=True))
+
+        parent = img_tag.parent
+        if parent:
+            texts.append(parent.get_text(" ", strip=True))
+
+        prev = img_tag.find_previous(["p", "h1", "h2", "h3", "h4", "li"])
+        nxt = img_tag.find_next(["p", "h1", "h2", "h3", "h4", "li"])
+        if prev:
+            texts.append(prev.get_text(" ", strip=True))
+        if nxt:
+            texts.append(nxt.get_text(" ", strip=True))
+
+        merged = normalize_text("\n".join([t for t in texts if t]))
+        return merged[:1200]
+
+    def push(u: Optional[str], meta: Dict[str, Any]):
+        if not u:
+            return
+        u = (u or "").strip()
+        if not u:
+            return
+        full = urljoin(base_url, u)
+        # data:image/... ก็ถือว่าเป็นรูป (โหลดจาก base64)
+        if not (full.startswith("http") or full.startswith("data:")):
+            return
+        m = dict(meta or {})
+        m["img_url"] = full
+        items.append(m)
+
+    # og/twitter
+    og = soup.find("meta", property="og:image")
+    tw = soup.find("meta", attrs={"name": "twitter:image"})
+    push(og.get("content") if og else None, {"alt": "og:image", "title": "", "nearby_text": ""})
+    push(tw.get("content") if tw else None, {"alt": "twitter:image", "title": "", "nearby_text": ""})
+
+    container = soup.find("article") or soup.find("main") or soup.body or soup
+
+    # 1) <img ...>
+    for img in container.find_all("img"):
+        alt = (img.get("alt") or "").strip()
+        title = (img.get("title") or "").strip()
+        nearby_text = get_nearby_text(img)
+
+        # srcset priority
+        srcset = img.get("srcset") or img.get("data-srcset") or ""
+        best = _pick_best_from_srcset(srcset)
+        push(best, {"alt": alt, "title": title, "nearby_text": nearby_text})
+
+        # common lazy attrs
+        for key in ["src", "data-src", "data-lazy-src", "data-original", "data-url", "data-img-url"]:
+            push(img.get(key), {"alt": alt, "title": title, "nearby_text": nearby_text})
+
+    # 2) <picture><source srcset=...>
+    for pic in container.find_all("picture"):
+        sources = pic.find_all("source")
+        for s in sources:
+            srcset = s.get("srcset") or s.get("data-srcset") or ""
+            best = _pick_best_from_srcset(srcset)
+            push(best, {"alt": "picture", "title": "", "nearby_text": ""})
+        # fallback img in picture
+        im = pic.find("img")
+        if im:
+            srcset = im.get("srcset") or im.get("data-srcset") or ""
+            best = _pick_best_from_srcset(srcset)
+            push(best, {"alt": (im.get("alt") or "").strip(), "title": "", "nearby_text": get_nearby_text(im)})
+            for key in ["src", "data-src", "data-lazy-src", "data-original"]:
+                push(im.get(key), {"alt": (im.get("alt") or "").strip(), "title": "", "nearby_text": get_nearby_text(im)})
+
+    # 3) background-image ใน style
+    for tag in container.find_all(style=True):
+        style_text = tag.get("style") or ""
+        for u in _extract_bg_image_urls(style_text):
+            push(u, {"alt": "background-image", "title": "", "nearby_text": ""})
+
+    # uniq
+    uniq, seen = [], set()
+    for it in items:
+        u = it.get("img_url")
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        uniq.append(it)
+    return uniq
+
+
+def is_good_image_url(url: str) -> bool:
+    ul = (url or "").lower().strip()
+    # ยอม data: ได้ (base64)
+    if not ul:
+        return False
+    # ไม่ตัด svg แล้ว (โหลดเก็บได้เป็น .svg)
+    return True
+
+
+
+def download_images(
+    session: requests.Session,
+    image_items: List[Dict[str, Any]],
+    save_folder: str,
+    max_images: Optional[int] = None,   # ✅ None = ไม่จำกัด
+    referer: str = ""
+) -> List[Dict[str, Any]]:
+    """
+    ดาวน์โหลดรูปจาก candidates แล้วบันทึกลง images/
+    ✅ โหลดให้ได้มากที่สุด:
+    - ไม่ตัดรูปเล็ก
+    - รองรับ srcset/picture/bg (มาจาก extractor)
+    - รองรับ data:image/... (base64)
+    - รองรับ svg (save เป็น .svg)
+    - retry/backoff เมื่อ 403/429/5xx/timeout
+    - กันซ้ำด้วย sha1
+    """
+    safe_mkdir(save_folder)
+    saved: List[Dict[str, Any]] = []
+    seen_sha1 = set()
+
+    # headers base
+    base_headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Language": "th-TH,th;q=0.9,en;q=0.8",
+        "Connection": "keep-alive",
+    }
+    if referer:
+        base_headers["Referer"] = referer
+
+    for it in image_items:
+        if max_images is not None and len(saved) >= max_images:
+            break
+
+        u = (it.get("img_url") or "").strip()
+        if not u or not is_good_image_url(u):
+            continue
+
+        try:
+            data = b""
+            ct = ""
+            w = 0
+            h = 0
+            ext = "jpg"
+
+            # --- data URL ---
+            if u.startswith("data:"):
+                # data:image/png;base64,....
+                m = re.match(r"data:([^;]+);base64,(.+)$", u, flags=re.IGNORECASE | re.DOTALL)
+                if not m:
+                    continue
+                ct = (m.group(1) or "").lower().strip()
+                b64 = m.group(2) or ""
+                data = base64.b64decode(b64)
+                if not data:
+                    continue
+
+            else:
+                r = requests_get_with_retries(session, u, headers=base_headers, timeout=30, max_retries=3)
+                if not r or r.status_code != 200:
+                    continue
+
+                ct = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+                data = r.content or b""
+                if not data:
+                    continue
+
+            sha1 = _sha1_bytes(data)
+            if sha1 in seen_sha1:
+                continue
+
+            # --- decide ext + try read size if raster ---
+            if "svg" in ct or u.lower().endswith(".svg"):
+                ext = "svg"
+                # w/h ไม่ทราบสำหรับ svg
+            elif "png" in ct or u.lower().endswith(".png"):
+                ext = "png"
+            elif "webp" in ct or u.lower().endswith(".webp"):
+                ext = "webp"
+            elif "gif" in ct or u.lower().endswith(".gif"):
+                ext = "gif"
+            else:
+                ext = "jpg"
+
+            if ext != "svg":
+                try:
+                    img = Image.open(io.BytesIO(data))
+                    # บางไฟล์มี alpha
+                    img = img.convert("RGBA") if img.mode in ("P", "LA") else img.convert("RGB")
+                    w, h = img.size
+                except Exception:
+                    # ถ้าเปิดด้วย PIL ไม่ได้ แต่เป็น image/* ก็ยังเซฟไว้ก่อน
+                    pass
+
+            seen_sha1.add(sha1)
+
+            outp = os.path.join(save_folder, f"img_{len(saved)+1}_{random.randint(100,999)}.{ext}")
+            with open(outp, "wb") as f:
+                f.write(data)
+
+            saved.append({
+                "saved_path": outp,
+                "sha1": sha1,
+                "source_url": u,
+                "content_type": ct,
+                "width": w,
+                "height": h,
+                "alt_text": (it.get("alt") or "").strip(),
+                "title_text": (it.get("title") or "").strip(),
+                "nearby_text": (it.get("nearby_text") or "").strip(),
+            })
+
+        except Exception:
+            continue
+
+    return saved
+
+
+
+def download_files_via_requests(urls: List[str], save_folder: str, base_url: str, max_files: int = 50) -> int:
+    safe_mkdir(save_folder)
+    count = 0
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": USER_AGENT, "Referer": base_url})
+
+    for u in urls:
+        if count >= max_files:
+            break
+        try:
+            resp = sess.get(u, timeout=30, stream=True)
+            if not resp.ok:
+                continue
+
+            ct = (resp.headers.get("content-type") or "").lower()
+            if "text/html" in ct:
+                continue
+
+            data = resp.content
+            if not data or len(data) < 10 * 1024:
+                continue
+
+            ext = guess_ext_from_ct(ct)
+            outp = os.path.join(save_folder, f"file_{count+1}_{random.randint(100,999)}{ext}")
+            with open(outp, "wb") as f:
+                f.write(data)
+            count += 1
+        except Exception:
+            continue
+    return count
+
+
+# ----------------------------
+# Search helpers (FIXED)
+# ----------------------------
+def _ddg_decode_result_href(href: str) -> str:
+    """
+    DDG /html มักเป็น:
+    - /l/?uddg=<encoded>
+    - //duckduckgo.com/l/?uddg=<encoded>
+    - https://duckduckgo.com/l/?uddg=<encoded>
+    """
+    if not href:
+        return ""
+    href = href.strip()
+
+    if href.startswith("//"):
+        href = "https:" + href
+
+    if "duckduckgo.com/l/" in href or href.startswith("/l/"):
+        if href.startswith("/l/"):
+            href = "https://duckduckgo.com" + href
+        try:
+            qs = parse_qs(urlparse(href).query)
+            uddg = (qs.get("uddg") or [""])[0]
+            if uddg:
+                return unquote(uddg)
+        except Exception:
+            return ""
+        return ""
+    return href if href.startswith("http") else ""
+
+
+def duckduckgo_html_search(job_id: str, keyword: str, max_links: int = 5) -> List[str]:
+    # ใช้ html.duckduckgo.com จะนิ่งกว่า duckduckgo.com/html
+    url = f"https://html.duckduckgo.com/html/?q={quote(keyword)}"
+    log(job_id, "info", f"DuckDuckGo search: {url}")
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "th-TH,th;q=0.9,en;q=0.8",
+        "Referer": "https://duckduckgo.com/",
+    }
+
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code != 200 or not r.text.strip():
+            return []
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        raw_links: List[str] = []
+        for a in soup.select("a.result__a[href], a[href].result__a"):
+            raw_links.append(a.get("href") or "")
+
+        # fallback selector เผื่อ class เปลี่ยน
+        if not raw_links:
+            for a in soup.select("a[href]"):
+                href = a.get("href") or ""
+                if "uddg=" in href or "duckduckgo.com/l/" in href:
+                    raw_links.append(href)
+
+        links: List[str] = []
+        for href in raw_links:
+            u = _ddg_decode_result_href(href)
+            if u and u.startswith("http"):
+                links.append(u)
+
+        uniq, seen = [], set()
+        for u in links:
+            if u in seen:
+                continue
+            seen.add(u)
+            uniq.append(u)
+
+        return uniq[:max_links]
+    except Exception:
+        return []
+
+
+def bing_html_search(job_id: str, keyword: str, max_links: int = 5) -> List[str]:
+    url = f"https://www.bing.com/search?q={quote(keyword)}&count={max_links + 5}"
+    log(job_id, "info", f"Bing search: {url}")
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "th-TH,th;q=0.9,en;q=0.8",
+        "Referer": "https://www.bing.com/",
+    }
+
+    try:
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code != 200 or not r.text.strip():
+            return []
+
+        soup = BeautifulSoup(r.text, "html.parser")
+        links: List[str] = []
+        for a in soup.select("li.b_algo h2 a[href]"):
+            href = (a.get("href") or "").strip()
+            if href.startswith("http"):
+                links.append(href)
+
+        uniq, seen = [], set()
+        for u in links:
+            if u in seen:
+                continue
+            seen.add(u)
+            uniq.append(u)
+        return uniq[:max_links]
+    except Exception:
+        return []
+
+
+def _google_serp_parse_urls(html: str) -> List[str]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    out: List[str] = []
+
+    for a in soup.select("a[href]"):
+        href = a.get("href") or ""
+        # google classic
+        if href.startswith("/url?") and ("q=" in href or "url=" in href):
+            qs = parse_qs(urlparse(href).query)
+            q = (qs.get("q") or qs.get("url") or [""])[0]
+            q = unquote(q)
+            if q.startswith("http"):
+                out.append(q)
+
+    uniq, seen = [], set()
+    for u in out:
+        if u in seen:
+            continue
+        if "google.com" in urlparse(u).netloc:
+            continue
+        seen.add(u)
+        uniq.append(u)
+    return uniq
+
+
+def google_search_playwright(job_id: str, keyword: str, max_links: int = 5) -> List[str]:
+    qurl = f"https://www.google.com/search?q={quote(keyword)}&num={max_links + 6}"
+    log(job_id, "info", f"Google search (Playwright): {qurl}")
+
+    headless = bool(getattr(settings, "BROWSER_HEADLESS", False))
+    slowmo = int(getattr(settings, "BROWSER_SLOWMO_MS", 0))
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless, slow_mo=slowmo)
+        ctx = browser.new_context(user_agent=USER_AGENT, locale="th-TH")
+        page = ctx.new_page()
+        try:
+            page.goto(qurl, timeout=60_000)
+
+            # Handle consent pages (best-effort)
+            try:
+                # เผื่อเจอหน้าขอ consent
+                for txt in ["I agree", "Accept all", "Agree", "ยอมรับทั้งหมด", "ยอมรับ", "ยืนยัน"]:
+                    btn = page.locator(f"button:has-text('{txt}')")
+                    if btn.count() > 0:
+                        btn.first.click(timeout=2_000)
+                        break
+            except Exception:
+                pass
+
+            try:
+                page.wait_for_load_state("networkidle", timeout=7_000)
+            except PWTimeoutError:
+                pass
+
+            time.sleep(random.uniform(1.0, 1.8))
+            html = page.content()
+        finally:
+            ctx.close()
+            browser.close()
+
+    urls = _google_serp_parse_urls(html)
+    if urls:
+        log(job_id, "info", f"Google Playwright found {len(urls)} candidates")
+    return urls[:max_links]
+
+
+def search_urls(job_id: str, keyword: str, max_links: int = 5) -> List[str]:
+    """
+    ✅ แก้ให้ “ได้ URL จริง” ก่อน:
+    1) DuckDuckGo HTML (decode /l/?uddg= แล้ว)
+    2) Bing HTML fallback
+    3) Google Playwright (ไว้ท้ายสุด เพราะโดน consent/captcha บ่อย)
+    """
+    urls = duckduckgo_html_search(job_id, keyword, max_links=max_links)
+    if urls:
+        log(job_id, "info", f"DDG found {len(urls)} urls")
+        return urls
+
+    urls = bing_html_search(job_id, keyword, max_links=max_links)
+    if urls:
+        log(job_id, "info", f"Bing found {len(urls)} urls")
+        return urls
+
+    urls = google_search_playwright(job_id, keyword, max_links=max_links)
+    if urls:
+        return urls
+
+    log(job_id, "warn", "No URLs found from DDG/Bing/Google.")
+    return []
+
+
+# ----------------------------
+# Scrape one URL
+# ----------------------------
+def scrape_single_url(
+    job_id: str,
+    url: str,
+    folder: str,
+    max_images: Optional[int] = None,  # ✅ โหลดไม่จำกัด
+    max_files: int = 30
+) -> Dict[str, Any]:
+    """
+    Scrape 1 URL:
+    - ใช้งาน Playwright เป็นหลัก (เพราะ DrissionPage มีปัญหาและ Solver เป็น Playwright)
+    - รองรับ Recaptcha Solver
+    - Fallback ไป requests
+    """
+    safe_mkdir(folder)
+    images_dir = os.path.join(folder, "images")
+    files_dir = os.path.join(folder, "files")
+    safe_mkdir(images_dir)
+    safe_mkdir(files_dir)
+
+    html = ""
+    final_url = url
+    downloaded_files = 0
+    title = ""
+
+    # NOTE: ปิด DrissionPage ไปเลยตาม requirement เพื่อใช้ Playwright + Solver ใหม่
+        
+    # 1) Playwright (Primary Method)
+    try:
+        log(job_id, "info", f"Scraping URL (Playwright): {url}")
+        headless = bool(getattr(settings, "BROWSER_HEADLESS", False))
+        slowmo = int(getattr(settings, "BROWSER_SLOWMO_MS", 0))
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=headless,
+                slow_mo=slowmo,
+                args=["--start-maximized"]
+            )
+            ctx = browser.new_context(
+                user_agent=USER_AGENT,
+                locale="th-TH",
+                viewport=None
+            )
+            pw_page = ctx.new_page()
+
+            try:
+                # 1) goto (ลอง 2 จังหวะ)
+                try:
+                    pw_page.goto(url, timeout=60_000, wait_until="domcontentloaded")
+                except PWTimeoutError:
+                    pw_page.goto(url, timeout=60_000, wait_until="load")
+
+                # 2) เช็ค/แก้ captcha
+                try:
+                    has_captcha = pw_page.locator('iframe[title="reCAPTCHA"]').count() > 0
+                    if has_captcha:
+                        log(job_id, "warn", "Captcha detected! Attempting to solve with Playwright...")
+                        solver = RecaptchaSolver(pw_page)
+                        solved = solver.solveCaptcha(max_retries=3)
+                        if solved:
+                            log(job_id, "info", "Captcha Solved! Waiting for reload...")
+                            try:
+                                pw_page.wait_for_load_state("networkidle", timeout=10_000)
+                            except PWTimeoutError:
+                                pass
+                            time.sleep(3)
+                        else:
+                            log(job_id, "error", "Failed to solve Captcha.")
+                except Exception as e:
+                    log(job_id, "warn", f"Error during captcha check: {e}")
+
+                # 3) รอโหลดเพิ่ม
+                try:
+                    pw_page.wait_for_load_state("networkidle", timeout=10_000)
+                except PWTimeoutError:
+                    pass
+                time.sleep(1.2)
+
+                # 4) ✅ text_probe (ตำแหน่งถูกแล้ว)
+                try:
+                    text_probe = (pw_page.title() or "") + "\n" + (pw_page.content() or "")[:2000]
+                    if is_probably_blocked(text_probe):
+                        log(job_id, "warn", "Page looks blocked (captcha/denied/cloudflare).")
+                except Exception:
+                    pass
+
+                # 5) เก็บผลลัพธ์
+                final_url = pw_page.url
+                html = pw_page.content() or ""
+                title = pw_page.title() or ""
+
+            finally:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+
+    except Exception as e:
+        log(job_id, "warn", f"Playwright failed: {e}")
+
+
+    # 2) requests fallback (ถ้า Playwright พัง หรือ html ว่างเปล่า)
+    if not html.strip():
+        try:
+            log(job_id, "info", f"Scraping URL (requests fallback): {url}")
+            r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+            if r.status_code == 200 and r.text.strip():
+                final_url = r.url
+                html = r.text
+        except Exception as e:
+            log(job_id, "error", f"requests fallback failed: {e}")
+
+    # --- Process text/title ---
+    if not title:
+        title = extract_page_title(html)
+
+    text = content_text_from_html(html)
+
+    # ... (ส่วน download files/images ด้านล่างเหมือนเดิม ไม่ต้องแก้) ...
+    
+    content_path = os.path.join(folder, "content.txt")
+    with open(content_path, "w", encoding="utf-8") as f:
+        f.write(text or "")
+
+    # --- Download files ---
+    try:
+        file_links = extract_file_links(html, final_url)
+        downloaded_files = download_files_via_requests(
+            file_links, files_dir, base_url=final_url, max_files=max_files
+        )
+    except Exception:
+        downloaded_files = 0
+
+    # --- Download images + write download meta ---
+    images_download_meta_jsonl = os.path.join(images_dir, "images_download_meta.jsonl")
+
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": USER_AGENT})
+
+    img_items = extract_image_candidates(html, final_url)
+    saved_imgs = download_images(
+        session=sess,
+        image_items=img_items,
+        save_folder=images_dir,
+        max_images=max_images,
+        referer=final_url,
+    )
+
+    for it in saved_imgs:
+        append_jsonl(images_download_meta_jsonl, {
+            "type": "web_image_download",
+            "page_url": final_url,
+            "page_title": title,
+            "source_url": it.get("source_url", ""),
+            "saved_path": it.get("saved_path", ""),
+            "sha1": it.get("sha1", ""),
+            "width": it.get("width", 0),
+            "height": it.get("height", 0),
+            "alt_text": it.get("alt_text", ""),
+            "title_text": it.get("title_text", ""),
+            "nearby_text": it.get("nearby_text", ""),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+
+    log(job_id, "info", f"Scrape finished: {final_url}", {
+        "title": title,
+        "content_len": len(text or ""),
+        "images": len(saved_imgs),
+        "files": downloaded_files,
+    })
+
+    return {
+        "URL": final_url,
+        "Title": title,
+        "Folder": folder,
+        "content_path": content_path,
+        "images_dir": images_dir,
+        "files_dir": files_dir,
+        "images_download_meta_jsonl": images_download_meta_jsonl,
+        "downloaded_images": len(saved_imgs),
+        "downloaded_files": downloaded_files,
+    }
+
+
+def run_external_scrape(job_id: str, keyword: str, max_links: int = 5) -> Dict[str, Any]:
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    safe_kw = re.sub(r"[^a-zA-Z0-9ก-๙_]+", "_", keyword)[:40]
+    main_folder = os.path.join(settings.OUTPUT_BASE_DIR, f"data_{safe_kw}_{ts}")
+    safe_mkdir(main_folder)
+
+    urls = search_urls(job_id, keyword, max_links=max_links)
+    log(job_id, "info", f"Search URLs => {len(urls)}", {"urls": urls})
+
+    collected: List[Dict[str, Any]] = []
+    for idx, u in enumerate(urls, start=1):
+        site_folder = os.path.join(main_folder, f"{idx}_{safe_filename(urlparse(u).netloc, 40)}")
+        try:
+            res = scrape_single_url(job_id, u, site_folder)
+            res["Source"] = "search_urls"
+            collected.append(res)
+        except Exception as e:
+            log(job_id, "error", f"Failed to scrape {u}: {e}", {"traceback": traceback.format_exc()})
+
+    csv_path = os.path.join(main_folder, "final_data.csv")
+    if collected:
+        pd.DataFrame(collected).to_csv(csv_path, index=False, encoding="utf-8-sig")
+
+    return {
+        "main_folder": main_folder,
+        "csv_path": csv_path,
+        "items": collected,
+        "urls": urls,
+    }
+
+==================================================================================================
+
+17.) utils/__init__.py:
+# backend/report_utils/__init__.py
+
+from __future__ import annotations
+
+import os
+import json
+from typing import Any, Dict, List
+
+def _count_jsonl(path: str) -> int:
+    if not path or not os.path.exists(path):
+        return 0
+    n = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                n += 1
+    return n
+
+def _list_files(dir_path: str, exts: tuple = ()) -> List[str]:
+    if not dir_path or not os.path.isdir(dir_path):
+        return []
+    out = []
+    for fn in os.listdir(dir_path):
+        p = os.path.join(dir_path, fn)
+        if os.path.isfile(p):
+            if not exts or fn.lower().endswith(exts):
+                out.append(p)
+    return sorted(out)
+
+def generate_report_md(main_folder: str, scrape_result: Dict[str, Any]) -> str:
+    """
+    สร้าง report.md เพื่อ audit โฟลเดอร์ scrape ว่ามีอะไรบ้าง และช่วย debug pipeline
+    """
+    report_path = os.path.join(main_folder, "report.md")
+
+    lines: List[str] = []
+    lines.append("# Scrape Audit Report\n\n")
+    lines.append(f"- Main folder: `{main_folder}`\n")
+    if scrape_result.get("file_path"):
+        lines.append(f"- CSV: `{scrape_result['file_path']}`\n")
+    if scrape_result.get("ocr_job_id"):
+        lines.append(f"- OCR Job: `{scrape_result['ocr_job_id']}`\n")
+    if scrape_result.get("ocr_status_url"):
+        lines.append(f"- OCR Status URL: `http://localhost:8000{scrape_result['ocr_status_url']}`\n")
+
+    lines.append("\n---\n\n## Sites\n\n")
+    lines.append("| # | Source | URL | images | images_meta | images_understanding | files | site_folder |\n")
+    lines.append("|---|--------|-----|--------|------------|---------------------|-------|------------|\n")
+
+    collected = scrape_result.get("data") or []
+    for i, row in enumerate(collected, start=1):
+        folder = row.get("Folder") or ""
+        img_dir = os.path.join(folder, "images")
+        file_dir = os.path.join(folder, "files")
+
+        imgs = _list_files(img_dir, (".jpg", ".jpeg", ".png", ".webp"))
+        files = _list_files(file_dir, (".pdf", ".xlsx", ".xls", ".docx", ".pptx", ".zip", ".bin"))
+
+        meta_jsonl = os.path.join(img_dir, "images_meta.jsonl")
+        under_jsonl = os.path.join(folder, "images_understanding.jsonl")
+
+        meta_lines = _count_jsonl(meta_jsonl)
+        under_lines = _count_jsonl(under_jsonl)
+
+        url = row.get("URL") or ""
+        url_md = f"[link]({url})" if url.startswith("http") else url
+
+        lines.append(
+            f"| {i} | {row.get('Source','')} | {url_md} | {len(imgs)} | {meta_lines} | {under_lines} | {len(files)} | `{folder}` |\n"
+        )
+
+    ocr_root = os.path.join(main_folder, "ocr_results")
+    lines.append("\n---\n\n## OCR Outputs\n\n")
+    lines.append(f"- ocr_results: `{ocr_root}`\n")
+    if os.path.isdir(ocr_root):
+        pdf_dirs = [d for d in sorted(os.listdir(ocr_root)) if os.path.isdir(os.path.join(ocr_root, d))]
+        lines.append(f"- pdf folders: {len(pdf_dirs)}\n")
+        for d in pdf_dirs[:80]:
+            p = os.path.join(ocr_root, d)
+            docs_jsonl = os.path.join(p, "docs.jsonl")
+            img_jsonl = os.path.join(p, "images.jsonl")
+            lines.append(
+                f"  - `{d}` docs.jsonl={os.path.exists(docs_jsonl)} images.jsonl={os.path.exists(img_jsonl)}\n"
+            )
+    else:
+        lines.append("- (ยังไม่พบ ocr_results)\n")
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+    return report_path
+
+==================================================================================================
+
+18.) job_manager.py:
+# backend/utils/job_manager.py
+from __future__ import annotations
+
+import time
+import threading
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+WORKFLOW_STEPS = [
+    {"key": "idle", "label": "Idle"},
+    {"key": "web_scraping", "label": "Web Scraping"},
+    {"key": "data_collecting", "label": "Data Collecting"},
+    {"key": "captioning", "label": "Image Captioning"},
+    {"key": "ocr", "label": "OCR Processing"},
+    {"key": "ingest_external", "label": "Ingest External RAG"},
+    {"key": "ingest_internal", "label": "Ingest Internal RAG"},
+    {"key": "ready", "label": "Ready"},
+    {"key": "error", "label": "Error"},
+]
+
+_LOCK = threading.Lock()
+_STATUS: Dict[str, Dict[str, Any]] = {}
+_LOGS: Dict[str, List[Dict[str, Any]]] = {}
+
+def new_job(job_id: str, kind: str) -> None:
+    with _LOCK:
+        _STATUS[job_id] = {
+            "job_id": job_id,
+            "kind": kind,
+            "stage": "idle",
+            "message": "",
+            "updated_at": time.time(),
+            "result": {},
+        }
+        _LOGS[job_id] = []
+
+def set_stage(job_id: str, stage: str, message: str = "", extra: Optional[dict] = None) -> None:
+    with _LOCK:
+        st = _STATUS.setdefault(job_id, {"job_id": job_id})
+        st["stage"] = stage
+        st["message"] = message
+        st["updated_at"] = time.time()
+        if extra:
+            st.update(extra)
+
+def log(job_id: str, level: str, message: str, data: Optional[dict] = None) -> None:
+    with _LOCK:
+        _LOGS.setdefault(job_id, [])
+        _LOGS[job_id].append({
+            "ts": time.time(),
+            "level": level,
+            "message": message,
+            "data": data or {},
+        })
+        _LOGS[job_id] = _LOGS[job_id][-5000:]  # cap
+
+def get_status(job_id: str) -> Dict[str, Any]:
+    with _LOCK:
+        return dict(_STATUS.get(job_id, {"job_id": job_id, "stage": "not_found"}))
+
+def get_logs(job_id: str, tail: int = 200) -> List[Dict[str, Any]]:
+    with _LOCK:
+        return list(_LOGS.get(job_id, []))[-tail:]
+
+def get_workflow_steps() -> List[Dict[str, Any]]:
+    return WORKFLOW_STEPS[:]
+
+==================================================================================================
+
+19.) jsonl.py:
+# backend/utils/jsonl.py
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Dict, Iterable
+
+def safe_mkdir(p: str) -> None:
+    os.makedirs(p, exist_ok=True)
+
+def append_jsonl(path: str, row: Dict[str, Any]) -> None:
+    safe_mkdir(os.path.dirname(path) or ".")
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+def write_jsonl(path: str, rows: Iterable[Dict[str, Any]]) -> None:
+    safe_mkdir(os.path.dirname(path) or ".")
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+def iter_jsonl(path: str):
+    if not path or not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except Exception:
+                continue
+
+==================================================================================================
+
+20.) text.py:
+
+# backend/utils/text.py
+from __future__ import annotations
+
+import re
+import unicodedata
+
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_ZW_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\ufeff]")
+
+# พยายามตัดตาม “จบประโยค” ทั้งอังกฤษ/ไทยแบบประมาณการ
+_SENT_SPLIT_RE = re.compile(r"(?<=[\.\!\?\u0E2F\u0E46])\s+")
+
+
+def normalize_text(s: str) -> str:
+    s = s or ""
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("\u00a0", " ")
+    s = _CONTROL_CHARS_RE.sub("", s)
+    s = _ZW_RE.sub("", s)
+    s = re.sub(r"[^\S\r\n]+", " ", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+def contains_thai(s: str) -> bool:
+    return any("\u0E00" <= ch <= "\u0E7F" for ch in (s or ""))
+
+
+def _split_long_block(block: str, max_len: int) -> list[str]:
+    """
+    แตก block ยาวๆ ให้ไม่เกิน max_len
+    ลำดับ:
+    1) split ตามประโยค (ถ้าพอช่วยได้)
+    2) ถ้ายังมีชิ้นที่ยาวเกิน -> split แบบ sliding window ด้วยตัวอักษร
+    """
+    block = (block or "").strip()
+    if not block:
+        return []
+    if len(block) <= max_len:
+        return [block]
+
+    # 1) พยายามตัดตามประโยค
+    sents = [x.strip() for x in _SENT_SPLIT_RE.split(block) if x.strip()]
+    if len(sents) <= 1:
+        sents = [block]  # ตัดไม่ออก ก็ใช้ทั้งก้อน
+
+    pieces: list[str] = []
+    buf = ""
+    for s in sents:
+        if not s:
+            continue
+        if len(s) > max_len:
+            # 2) ถ้าประโยคเดียวก็ยังยาวเกิน -> sliding window
+            if buf:
+                pieces.append(buf.strip())
+                buf = ""
+            step = max(1, max_len)
+            i = 0
+            while i < len(s):
+                pieces.append(s[i:i + max_len].strip())
+                i += step
+            continue
+
+        if not buf:
+            buf = s
+        elif len(buf) + 1 + len(s) <= max_len:
+            buf = (buf + " " + s).strip()
+        else:
+            pieces.append(buf.strip())
+            buf = s
+
+    if buf:
+        pieces.append(buf.strip())
+
+    # กันหลุด: ถ้ายังมีอันยาวเกิน (กรณี whitespace แปลกๆ) -> บังคับตัด
+    out: list[str] = []
+    for p in pieces:
+        if len(p) <= max_len:
+            out.append(p)
+        else:
+            i = 0
+            while i < len(p):
+                out.append(p[i:i + max_len].strip())
+                i += max_len
+    return [x for x in out if x]
+
+
+def chunk_text(text: str, chunk_size: int = 900, overlap: int = 120) -> list[str]:
+    """
+    ✅ รับประกันว่า "ทุก chunk" จะไม่ยาวเกิน chunk_size
+    - แบ่งตามย่อหน้า (\n\n)
+    - ถ้าย่อหน้ายาวเกิน chunk_size -> แตกเป็นชิ้นย่อย
+    - ทำ overlap ระหว่าง chunk เพื่อไม่เสียบริบท
+    """
+    text = normalize_text(text)
+    if not text:
+        return []
+
+    # แยกย่อหน้า
+    paras = re.split(r"\n\s*\n", text)
+
+    chunks: list[str] = []
+    buf = ""
+
+    for p in paras:
+        p = (p or "").strip()
+        if not p:
+            continue
+
+        # ถ้าย่อหน้าเดียวใหญ่เกิน -> แตกย่อหน้าก่อน
+        if len(p) > chunk_size:
+            # flush buf ก่อน
+            if buf:
+                chunks.append(buf.strip())
+                buf = ""
+
+            parts = _split_long_block(p, chunk_size)
+            chunks.extend(parts)
+            continue
+
+        # ย่อหน้าปกติ: pack ลง buf
+        if not buf:
+            buf = p
+        elif len(buf) + 2 + len(p) <= chunk_size:
+            buf = (buf + "\n\n" + p).strip()
+        else:
+            chunks.append(buf.strip())
+            buf = p
+
+    if buf:
+        chunks.append(buf.strip())
+
+    # Overlap (เหมือนเดิม แต่กันกรณี overlap > len(prev))
+    if overlap > 0 and len(chunks) > 1:
+        out: list[str] = []
+        prev = ""
+        for c in chunks:
+            if prev:
+                ov = prev[-min(overlap, len(prev)):]
+                out.append((ov + "\n" + c).strip())
+            else:
+                out.append(c)
+            prev = c
+        return out
+
+    return chunks
+
+==================================================================================================
+
+21.) image_understanding.py:
+# backend/vision/image_understanding.py
+from __future__ import annotations
+
+import os
+import io
+import time
+import json
+import hashlib
+import traceback
+from typing import Any, Dict, List, Optional, Tuple
+
+from PIL import Image
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+from backend.utils.text import normalize_text
+from backend.utils.jsonl import write_jsonl, iter_jsonl
+
+# ----------------------------
+# Optional deps flags
+# ----------------------------
+_BLIP_OK = False
+_ARGOS_OK = False
+
+# ----------------------------
+# Try import BLIP (robust way)
+# ----------------------------
+try:
+    import torch
+    from transformers import BlipProcessor, BlipForConditionalGeneration
+    _BLIP_OK = True
+except Exception:
+    _BLIP_OK = False
+
+# ----------------------------
+# Try import Argos
+# ----------------------------
+try:
+    import argostranslate.translate
+    import argostranslate.package
+    _ARGOS_OK = True
+except Exception:
+    _ARGOS_OK = False
+
+SUPPORTED_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+
+
+# ----------------------------
+# Utils
+# ----------------------------
+def sha1_bytes(b: bytes) -> str:
+    return hashlib.sha1(b).hexdigest()
+
+
+def list_images(images_dir: str) -> List[str]:
+    out: List[str] = []
+    if not images_dir or not os.path.isdir(images_dir):
+        return out
+    for root, _, files in os.walk(images_dir):
+        for fn in files:
+            if fn.lower().endswith(SUPPORTED_EXTS):
+                out.append(os.path.join(root, fn))
+    return sorted(out)
+
+
+def warmup_blip(model_name: str) -> None:
+    """
+    โหลด BLIP ไว้ล่วงหน้า (ลดหน่วงรอบแรก)
+    """
+    if not _BLIP_OK:
+        print("[BLIP] Warmup skipped (_BLIP_OK=False)")
+        return
+    try:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[BLIP] Warming up {model_name} on {device} ...")
+        _ = BlipProcessor.from_pretrained(model_name)
+        m = BlipForConditionalGeneration.from_pretrained(model_name)
+        _ = m.to(device)
+        print("[BLIP] Warmup success.")
+    except Exception as e:
+        print(f"[BLIP Error] Warmup failed: {e}")
+        traceback.print_exc()
+
+
+def compute_relevance_score(context_text: str, caption: str) -> float:
+    if not context_text or not caption:
+        return 0.0
+    t1 = normalize_text(context_text)[:7000]
+    t2 = normalize_text(caption)[:600]
+    try:
+        vec = TfidfVectorizer(stop_words=None)
+        X = vec.fit_transform([t1, t2])
+        score = float(cosine_similarity(X[0], X[1])[0][0])
+        return max(0.0, min(1.0, score))
+    except Exception:
+        return 0.0
+
+
+def guess_image_type(caption_en: str) -> str:
+    c = (caption_en or "").lower()
+    if any(k in c for k in ["chart", "graph", "plot", "bar chart", "line chart", "pie chart"]):
+        return "chart"
+    if any(k in c for k in ["table", "spreadsheet"]):
+        return "table"
+    if any(k in c for k in ["document", "paper", "report", "invoice", "slide", "presentation"]):
+        return "document"
+    if "logo" in c:
+        return "logo"
+    if any(k in c for k in ["person", "people", "man", "woman", "portrait", "face"]):
+        return "people"
+    if "infographic" in c:
+        return "infographic"
+    return "other"
+
+
+# ----------------------------
+# Argos helpers
+# ----------------------------
+def ensure_argos_langpair(from_code: str = "en", to_code: str = "th") -> bool:
+    """
+    Best-effort: ถ้าไม่มี package en->th จะพยายามติดตั้งให้
+    (ต้องมีอินเทอร์เน็ตในครั้งแรก)
+    """
+    if not _ARGOS_OK:
+        return False
+
+    try:
+        installed = argostranslate.package.get_installed_packages()
+        if any(p.from_code == from_code and p.to_code == to_code for p in installed):
+            return True
+
+        print(f"[Argos] Language package {from_code}->{to_code} not installed. Trying to install (best-effort)...")
+        try:
+            argostranslate.package.update_package_index()
+            available = argostranslate.package.get_available_packages()
+            target = None
+            for p in available:
+                if p.from_code == from_code and p.to_code == to_code:
+                    target = p
+                    break
+            if not target:
+                print("[Argos] No available package found in index.")
+                return False
+            download_path = target.download()
+            argostranslate.package.install_from_path(download_path)
+            print("[Argos] Installed language package successfully.")
+            return True
+        except Exception as e:
+            print(f"[Argos] Auto-install failed: {e}")
+            print("[Argos Hint] If offline, run once with internet: `argospm install en th`")
+            return False
+    except Exception:
+        return False
+
+
+def translate_en_to_th(text: str, from_code: str = "en", to_code: str = "th") -> str:
+    if not _ARGOS_OK:
+        return ""
+    if not text:
+        return ""
+
+    # ensure package exists (best-effort)
+    _ = ensure_argos_langpair(from_code, to_code)
+
+    try:
+        out = argostranslate.translate.translate(text, from_code, to_code)
+        return (out or "").strip()
+    except Exception as e:
+        print(f"[Argos Translation Error] {e}")
+        return ""
+
+
+# ----------------------------
+# Download meta mapper
+# ----------------------------
+def _load_download_meta_map(images_download_meta_jsonl: Optional[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    คืน map โดย key=sha1 (ถ้ามี) และ key=saved_path (fallback)
+    """
+    mp: Dict[str, Dict[str, Any]] = {}
+    if not images_download_meta_jsonl or not os.path.exists(images_download_meta_jsonl):
+        return mp
+
+    for obj in iter_jsonl(images_download_meta_jsonl) or []:
+        if not isinstance(obj, dict):
+            continue
+        sha1 = (obj.get("sha1") or "").strip()
+        sp = (obj.get("saved_path") or "").strip()
+        if sha1:
+            mp[f"sha1:{sha1}"] = obj
+        if sp:
+            mp[f"path:{os.path.abspath(sp)}"] = obj
+    return mp
+
+
+def _fallback_caption_from_meta(base: Dict[str, Any]) -> str:
+    """
+    ถ้า BLIP caption ว่าง ให้ดึงข้อความจาก meta ที่ scrape มา:
+    - alt_text / title_text / nearby_text
+    """
+    if not base:
+        return ""
+    fallback = " ".join([
+        (base.get("alt_text") or "").strip(),
+        (base.get("title_text") or "").strip(),
+        (base.get("nearby_text") or "").strip(),
+    ]).strip()
+    return normalize_text(fallback)[:300]
+
+
+# ----------------------------
+# BLIP captioner (robust)
+# ----------------------------
+class BLIPCaptioner:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+        self.device = "cuda" if (_BLIP_OK and torch.cuda.is_available()) else "cpu"
+        self._processor = None
+        self._model = None
+
+    def _lazy_init(self) -> None:
+        if self._processor is not None and self._model is not None:
+            return
+        if not _BLIP_OK:
+            return
+
+        try:
+            print(f"[BLIP] Loading processor/model: {self.model_name} on {self.device}")
+            self._processor = BlipProcessor.from_pretrained(self.model_name)
+            self._model = BlipForConditionalGeneration.from_pretrained(self.model_name).to(self.device)
+            self._model.eval()
+            print("[BLIP] Loaded successfully.")
+        except Exception as e:
+            print(f"[BLIP Error] Failed to load BLIP model: {e}")
+            traceback.print_exc()
+            self._processor = None
+            self._model = None
+
+    def caption_en(self, image: Image.Image) -> str:
+        if not _BLIP_OK:
+            return ""
+        self._lazy_init()
+        if self._processor is None or self._model is None:
+            return ""
+
+        try:
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+
+            # ป้องกันภาพใหญ่มากจนโมเดล fail/ช้าเกิน
+            if max(image.size) > 1600:
+                image = image.copy()
+                image.thumbnail((1600, 1600))
+
+            inputs = self._processor(images=image, return_tensors="pt")
+
+            # บาง key ไม่ใช่ tensor -> อย่าฝืน .to()
+            for k in list(inputs.keys()):
+                try:
+                    inputs[k] = inputs[k].to(self.device)
+                except Exception:
+                    pass
+
+            with torch.no_grad():
+                out_ids = self._model.generate(
+                    **inputs,
+                    max_new_tokens=30,
+                    num_beams=3,
+                )
+
+            cap = self._processor.decode(out_ids[0], skip_special_tokens=True)
+            return normalize_text(cap)
+        except Exception as e:
+            print(f"[BLIP Inference Error] {e}")
+            return ""
+
+
+# ----------------------------
+# Main function
+# ----------------------------
+def caption_images_with_blip_and_translate(
+    images_dir: str,
+    images_meta_jsonl: str,
+    images_understanding_jsonl: str,
+    context_text: str,
+    blip_model: str,
+    images_download_meta_jsonl: Optional[str] = None,
+    dedupe: bool = True
+) -> Dict[str, Any]:
+    """
+    สร้าง caption_en ด้วย BLIP และ caption_th ด้วย Argos
+    - กัน duplicate ด้วย sha1
+    - ✅ ถ้า duplicate: copy caption จากต้นฉบับแทนการปล่อยว่าง
+    - ✅ ถ้า BLIP ได้ caption ว่าง: fallback จาก alt/title/nearby_text
+    - เขียน 2 ไฟล์:
+      1) images_meta.jsonl (ไว้ดู/อ้างอิง)
+      2) images_understanding.jsonl (ไว้ ingest เข้า RAG)
+    """
+
+    context_text = context_text or ""
+
+    print(f"[Captioning] Starting for folder: {images_dir} using model: {blip_model}")
+    captioner = BLIPCaptioner(model_name=blip_model)
+    imgs = list_images(images_dir)
+    print(f"[Captioning] Found {len(imgs)} images to process.")
+
+    download_meta_map = _load_download_meta_map(images_download_meta_jsonl)
+
+    # maps for dedupe copy
+    first_path_by_sha1: Dict[str, str] = {}
+    caption_cache_by_sha1: Dict[str, Tuple[str, str, str, float, bool, str, str]] = {}
+    # (cap_en, cap_th, image_type, score, keep, caption_status, caption_error)
+
+    meta_rows: List[Dict[str, Any]] = []
+    under_rows: List[Dict[str, Any]] = []
+
+    processed = 0
+    captioned = 0
+    duplicates_skipped = 0
+
+    for i, ipath in enumerate(imgs):
+        apath = os.path.abspath(ipath)
+        try:
+            b = open(ipath, "rb").read()
+        except Exception as e:
+            print(f"[Captioning Error] Could not read file {ipath}: {e}")
+            continue
+
+        h = sha1_bytes(b)
+        is_dup = bool(dedupe and (h in first_path_by_sha1))
+        dup_of_sha1 = h if is_dup else ""
+
+        base = download_meta_map.get(f"sha1:{h}") or download_meta_map.get(f"path:{apath}") or {}
+
+        if is_dup:
+            duplicates_skipped += 1
+            cap_en, cap_th, image_type, score, keep, caption_status, caption_error = caption_cache_by_sha1.get(
+                h, ("", "", "other", 0.0, False, "fail", "duplicate_without_cache")
+            )
+        else:
+            print(f"[Captioning] Processing image {i+1}/{len(imgs)}: {ipath}")
+            first_path_by_sha1[h] = ipath
+
+            try:
+                im = Image.open(io.BytesIO(b)).convert("RGB")
+            except Exception as e:
+                print(f"[Captioning Error] Invalid image data {ipath}: {e}")
+                continue
+
+            # 1) BLIP caption
+            cap_en = (captioner.caption_en(im) or "").strip()
+
+            # 2) Fallback ถ้า BLIP ว่าง: ใช้ alt/title/nearby_text
+            used_fallback = False
+            if not cap_en:
+                cap_en = _fallback_caption_from_meta(base)
+                used_fallback = bool(cap_en)
+
+            # 3) Translate TH (เฉพาะเมื่อมี cap_en)
+            cap_th = translate_en_to_th(cap_en, "en", "th") if cap_en else ""
+
+            # 4) status/error
+            if cap_en:
+                caption_status = "ok"
+                caption_error = "used_meta_fallback" if used_fallback else ""
+                print(f"  -> EN: {cap_en}")
+                if cap_th:
+                    print(f"  -> TH: {cap_th}")
+            else:
+                caption_status = "fail"
+                caption_error = "empty_caption_after_fallback"
+                print("  -> Failed to generate caption (BLIP empty + fallback empty).")
+
+            image_type = guess_image_type(cap_en)
+            score = compute_relevance_score(context_text, cap_en or cap_th)
+            keep = (score >= 0.12) or (image_type in ("chart", "table", "document", "infographic"))
+
+            # cache ไว้ให้ duplicate reuse
+            caption_cache_by_sha1[h] = (cap_en, cap_th, image_type, float(score), bool(keep), caption_status, caption_error)
+
+        if cap_en:
+            captioned += 1
+
+        row = {
+            "type": "web_image",
+            "page_url": (base.get("page_url") or base.get("page") or "").strip(),
+            "page_title": (base.get("page_title") or "").strip(),
+            "source_url": (base.get("source_url") or base.get("img_url") or "").strip(),
+            "saved_path": ipath,
+            "sha1": h,
+            "width": int(base.get("width") or 0),
+            "height": int(base.get("height") or 0),
+            "alt_text": (base.get("alt_text") or base.get("alt") or "").strip(),
+            "title_text": (base.get("title_text") or base.get("title") or "").strip(),
+            "nearby_text": (base.get("nearby_text") or "").strip(),
+
+            "caption_en": cap_en,
+            "caption_th": cap_th,
+            "image_type": image_type,
+            "relevance_score": float(score),
+            "keep_for_rag": bool(keep),
+
+            # ✅ debug fields (ช่วยหาสาเหตุ caption ว่าง)
+            "caption_status": caption_status,
+            "caption_error": caption_error,
+
+            "is_duplicate": bool(is_dup),
+            "duplicate_of_sha1": dup_of_sha1,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        meta_rows.append(row)
+
+        under_rows.append({
+            "type": "image_understanding",
+            "image_path": ipath,
+            "sha1": h,
+            "caption_en": cap_en,
+            "caption_th": cap_th,
+            "image_type": image_type,
+            "relevance_score": float(score),
+            "keep_for_rag": bool(keep),
+
+            "caption_status": caption_status,
+            "caption_error": caption_error,
+
+            "is_duplicate": bool(is_dup),
+            "duplicate_of_sha1": dup_of_sha1,
+            "model": blip_model if _BLIP_OK else "blip_not_available",
+            "translator": "argos" if _ARGOS_OK else "argos_not_available",
+            "page_url": (base.get("page_url") or base.get("page") or "").strip(),
+            "source_url": (base.get("source_url") or base.get("img_url") or "").strip(),
+        })
+
+        processed += 1
+
+    # เขียนไฟล์ผลลัพธ์
+    write_jsonl(images_meta_jsonl, meta_rows)
+    write_jsonl(images_understanding_jsonl, under_rows)
+
+    print(f"[Captioning] Finished. Processed: {processed}, Captioned: {captioned}, Duplicates_skipped: {duplicates_skipped}")
+
+    # ✅ คืน key ให้ตรงกับ log ที่คุณเห็น
+    return {
+        "images_total": len(imgs),
+        "processed": processed,
+        "captioned": captioned,
+        "duplicates_skipped": duplicates_skipped,
+        "blip_ok": _BLIP_OK,
+        "argos_ok": _ARGOS_OK,
+        "images_meta_jsonl": images_meta_jsonl,
+        "images_understanding_jsonl": images_understanding_jsonl,
+    }
+
+==================================================================================================
+
+22.) test.py:
+# test.py
+from __future__ import annotations
+
+import os
+import json
+import argparse
+import asyncio
+import requests
+
+from backend.settings import settings
+from backend.rag.rag_store import RAGStore
+from backend.evaluation.eval_runner import run_eval
+
+def cmd_eval(args):
+    store = RAGStore(settings.DATABASE_URL, settings.OLLAMA_HOST, settings.EMBED_MODEL, settings.EMBED_DIMS)
+    async def run():
+        await store.init_db()
+        res = await run_eval(store, args.dataset, args.namespace, k=args.k)
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+    asyncio.run(run())
+
+def cmd_ask(args):
+    url = f"http://127.0.0.1:{settings.API_PORT}/ask"
+    r = requests.post(url, json={"question": args.question, "top_k": args.top_k}, timeout=180)
+    print(r.status_code)
+    print(r.text)
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p1 = sub.add_parser("eval")
+    p1.add_argument("--dataset", required=True)
+    p1.add_argument("--namespace", default="external")
+    p1.add_argument("--k", type=int, default=5)
+
+    p2 = sub.add_parser("ask")
+    p2.add_argument("--question", required=True)
+    p2.add_argument("--top_k", type=int, default=8)
+
+    return ap.parse_args()
+
+def main():
+    args = parse_args()
+    if args.cmd == "eval":
+        cmd_eval(args)
+    elif args.cmd == "ask":
+        cmd_ask(args)
+
+if __name__ == "__main__":
+    main()
+
+==================================================================================================

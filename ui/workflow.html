@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Workflow Stepper</title>
+  <link rel="stylesheet" href="/ui/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>Workflow Stepper + Logs</h1>
+
+    <div class="card">
+      <h2>Job</h2>
+      <div class="row">
+        <input id="jobId" placeholder="ใส่ job_id จาก pipeline" />
+        <button id="btnWatch">Watch</button>
+        <button id="btnStop">Stop</button>
+      </div>
+      <div id="steps" class="steps"></div>
+      <pre id="status"></pre>
+    </div>
+
+    <div class="card">
+      <h2>Logs</h2>
+      <pre id="logs"></pre>
+    </div>
+  </div>
+
+  <script src="/ui/workflow.js"></script>
+</body>
+</html>

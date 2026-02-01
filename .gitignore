@@ -1,62 +1,24 @@
-# ---------------------------------------
-# Python
-# ---------------------------------------
+.env
 __pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage.xml
-htmlcov/
-
-# ---------------------------------------
-# Virtualenv
-# ---------------------------------------
+*.pyc
+*.pyo
+*.pyd
+.venv/
 venv/
 ajgay/
-.venv/
 env/
+dist/
+build/
+problem/
 
-# ---------------------------------------
-# ENV (DO NOT COMMIT)
-# ---------------------------------------
-.env
-
-# ---------------------------------------
-# IDE
-# ---------------------------------------
-.vscode/
-.idea/
-
-# ---------------------------------------
-# OS
-# ---------------------------------------
-.DS_Store
-Thumbs.db
-
-# ---------------------------------------
-# Playwright
-# ---------------------------------------
-playwright-report/
-test-results/
-*.har
-
-# Chrome persistent profile created by web_scraping.py
-chrome_user_data/
-chroma_db
-rag_db
-
-# ---------------------------------------
-# OUTPUT DATA (สำคัญ: ไม่ต้อง commit ผล scrape/OCR)
-# ---------------------------------------
-data_*/
-outputs/
 scraped_outputs/
-ocr_results/
+tmp_uploads/
+*.db
+*.sqlite
 
-# Logs
+# playwright
+.playwright/
+**/storage_state*.json
+
+# logs
 *.log

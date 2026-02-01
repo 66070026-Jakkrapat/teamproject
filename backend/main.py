@@ -1,478 +1,419 @@
-"""
-backend/main.py
-
-FastAPI รวมระบบ:
-- /scrape -> scrape -> OCR queue -> (auto) postprocess -> image understanding -> ingest RAG
-- /ocr/status/{job_id} -> ดูสถานะ OCR
-- /pipeline/status/{job_id} -> ดูสถานะ pipeline ทั้งหมด
-- /models -> list models from Ollama
-- Serve UI: /ui, /ui/app.js, /ui/styles.css
-"""
-
+# backend/main.py
 from __future__ import annotations
 
 import os
-import json
 import time
 import uuid
-import importlib
 import threading
-from typing import Any, Dict, Optional
+import sys
+import traceback
+import asyncio
+from typing import Any, Dict
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Body
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi import Response
+from backend.vision.image_understanding import warmup_blip
+from backend.settings import settings
+from backend.utils.job_manager import (
+    new_job, set_stage, log,
+    get_status, get_logs, get_workflow_steps
+)
 
-import web_scraping
-from image_understanding import understand_images
+# ✅ แนะนำ: set env Paddle ไว้ตรงนี้ด้วย (กันหลุด)
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "true")
 
-# ของคุณต้องมีจริง:
-from rag_store import RAGStore, ingest_scrape_folder
-from agent_flow import AgenticRAG, OllamaLLM
-from report_utils import generate_report_md
+from backend.scraping.web_scraping import run_external_scrape
+from backend.scraping.facebook_scraping import scrape_facebook_post_html
+from backend.vision.image_understanding import caption_images_with_blip_and_translate
+from backend.ocr.ocr_pipeline import process_folder_pdfs
+from backend.rag.rag_store import RAGStore
+from backend.rag.ingest import ingest_main_folder, ingest_text_blob
+from backend.agent.agent_flow import AgenticRAG
+from backend.report_utils.report import generate_report_md
+from backend.evaluation.eval_runner import run_eval
 
-# ----------------------------
-# ENV (fix .env path ให้ชัวร์)
-# ----------------------------
-ENV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-load_dotenv(ENV_PATH)
-
-API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "8000"))
-
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-OLLAMA_LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "llama3.1:8b")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text:latest")
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava:7b")  # << สำคัญ
-
-CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_db")
-RAG_COLLECTION = os.getenv("RAG_COLLECTION", "rag_docs")
-
-OUTPUT_BASE_DIR = getattr(web_scraping, "OUTPUT_BASE_DIR", os.path.join(os.getcwd(), "scraped_outputs"))
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 UI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ui"))
 
-# ----------------------------
-# App
-# ----------------------------
-app = FastAPI(title="AI Scraper + OCR + Agentic RAG")
+store = RAGStore(
+    database_url=settings.DATABASE_URL,
+    ollama_host=settings.OLLAMA_HOST,
+    embed_model=settings.EMBED_MODEL,
+    embed_dims=settings.EMBED_DIMS
+)
+agent = AgenticRAG(store=store)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ✅ startup
+    os.makedirs(settings.OUTPUT_BASE_DIR, exist_ok=True)
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    await store.init_db()
+    # ใน lifespan:
+    warmup_blip(settings.BLIP_MODEL)
+    yield
+    # ✅ shutdown (ถ้าจะปิด engine ก็ทำได้ แต่ไม่จำเป็น)
+    # await store.engine.dispose()
+
+app = FastAPI(
+    title="AI Agent: Scraping + OCR + Dual RAG + Tavily + Evaluation",
+    description=(
+        "Workflow:\n"
+        "1) /pipeline/external/scrape\n"
+        "2) caption images (BLIP + Argos)\n"
+        "3) OCR PDFs\n"
+        "4) ingest to RAG (namespace external)\n"
+        "5) /ask (Agent) → structured/semantic → fallback Tavily\n"
+        "6) /eval/run precision/recall@k\n\n"
+        "UI Workflow: /ui/workflow\n"
+    ),
+    version="1.0.0",
+    lifespan=lifespan,  # ✅ เปลี่ยนตรงนี้
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# ----------------------------
-# Global RAG + Agent
-# ----------------------------
-store = RAGStore(
-    chroma_dir=CHROMA_DIR,
-    collection_name=RAG_COLLECTION,
-    ollama_host=OLLAMA_HOST,
-    embed_model=OLLAMA_EMBED_MODEL,
-)
-llm = OllamaLLM(host=OLLAMA_HOST, model=OLLAMA_LLM_MODEL)
-agent = AgenticRAG(store=store, llm=llm)
-
-# ----------------------------
-# Pipeline Status Registry
-# ----------------------------
-PIPELINE_LOCK = threading.Lock()
-PIPELINE_STATUS: Dict[str, Dict[str, Any]] = {}  # job_id -> status dict
 
 
-def set_stage(job_id: str, stage: str, message: str = "", extra: Optional[dict] = None) -> None:
-    with PIPELINE_LOCK:
-        st = PIPELINE_STATUS.setdefault(job_id, {})
-        st["job_id"] = job_id
-        st["stage"] = stage
-        st["message"] = message
-        st["updated_at"] = time.time()
-        if extra:
-            st.update(extra)
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    if os.path.exists(os.path.join(UI_DIR, "favicon.ico")):
+        return FileResponse(os.path.join(UI_DIR, "favicon.ico"))
+    return Response(status_code=204)
 
 
-def get_stage(job_id: str) -> Dict[str, Any]:
-    with PIPELINE_LOCK:
-        return PIPELINE_STATUS.get(job_id, {"job_id": job_id, "stage": "unknown"})
+@app.get("/docs", include_in_schema=False)
+def custom_swagger_ui_html():
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=app.title + " - Swagger UI",
+        swagger_js_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css",
+        swagger_ui_parameters={"persistAuthorization": True},
+    )
 
 
-# ----------------------------
-# Ollama helpers
-# ----------------------------
-def ollama_models() -> Dict[str, Any]:
-    try:
-        import requests
-        r = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
-        if r.status_code != 200:
-            return {"reachable": False, "status_code": r.status_code, "models": []}
-        data = r.json()
-        models = [m.get("name") for m in (data.get("models") or []) if m.get("name")]
-        return {"reachable": True, "models": models}
-    except Exception as e:
-        return {"reachable": False, "error": str(e), "models": []}
+@app.get("/ui/swagger_custom.js", include_in_schema=False)
+def swagger_custom_js():
+    return FileResponse(os.path.join(UI_DIR, "swagger_custom.js"))
 
 
-# ----------------------------
-# Background: wait OCR then postprocess+ingest
-# ----------------------------
-def wait_ocr_done(job_id: str, timeout_s: int = 60 * 60) -> Dict[str, Any]:
-    t0 = time.time()
-    while True:
-        with web_scraping.OCR_LOCK:
-            st = web_scraping.OCR_STATUS.get(job_id)
-        if not st:
-            return {"status": "not_found"}
-        status = st.get("status")
-        if status in ("done", "error"):
-            return st
-        if time.time() - t0 > timeout_s:
-            return {"status": "timeout", "last": st}
-        time.sleep(1.0)
-
-
-def run_postprocess_and_ingest(job_id: str) -> None:
-    """
-    ทำงานครบ:
-    - รอ OCR done
-    - image understanding (web images + pdf extracted images)
-    - generate report.md
-    - ingest เข้า Chroma (RAG)
-    """
-    set_stage(job_id, "waiting_ocr", "Waiting OCR job to finish...")
-    ocr_st = wait_ocr_done(job_id)
-
-    if ocr_st.get("status") == "error":
-        set_stage(job_id, "ocr_error", "OCR failed", {"ocr": ocr_st})
-        return
-
-    if ocr_st.get("status") == "timeout":
-        set_stage(job_id, "ocr_timeout", "OCR timeout", {"ocr": ocr_st})
-        return
-
-    main_folder = ocr_st.get("main_folder") or ""
-    out_root = ocr_st.get("out_root") or ""
-
-    if not main_folder or not os.path.isdir(main_folder):
-        set_stage(job_id, "bad_folder", "main_folder not found", {"main_folder": main_folder})
-        return
-
-    # ---------- Vision step ----------
-    models_info = ollama_models()
-    vision_ok = models_info.get("reachable") and (OLLAMA_VISION_MODEL in (models_info.get("models") or []))
-
-    if vision_ok:
-        set_stage(job_id, "vision_web", "Running image understanding for web images...")
-        # 1) web images per site
-        for name in sorted(os.listdir(main_folder)):
-            site_folder = os.path.join(main_folder, name)
-            if not os.path.isdir(site_folder) or not (name[:1].isdigit() and "_" in name):
-                continue
-            images_dir = os.path.join(site_folder, "images")
-            if not os.path.isdir(images_dir):
-                continue
-
-            ctx = ""
-            content_path = os.path.join(site_folder, "content.txt")
-            if os.path.exists(content_path):
-                try:
-                    with open(content_path, "r", encoding="utf-8") as f:
-                        ctx = f.read()
-                except Exception:
-                    ctx = ""
-
-            out_jsonl = os.path.join(site_folder, "images_understanding.jsonl")
-            print(f"🧠 Vision(web): {name} -> {out_jsonl}", flush=True)
-            understand_images(
-                images_dir=images_dir,
-                out_jsonl=out_jsonl,
-                context_text=ctx,
-                context_map=None,
-                ollama_host=OLLAMA_HOST,
-                model=OLLAMA_VISION_MODEL,
-                max_images=10000,
-                sleep_s=0.0,
-                dedupe=True,
-            )
-
-        # 2) pdf extracted images understanding
-        set_stage(job_id, "vision_pdf", "Running image understanding for PDF extracted images...")
-        if out_root and os.path.isdir(out_root):
-            for pdf_name in sorted(os.listdir(out_root)):
-                pdf_dir = os.path.join(out_root, pdf_name)
-                if not os.path.isdir(pdf_dir):
-                    continue
-
-                docs_jsonl = os.path.join(pdf_dir, "docs.jsonl")
-                images_dir = os.path.join(pdf_dir, "images")
-                if not os.path.exists(docs_jsonl) or not os.path.isdir(images_dir):
-                    continue
-
-                ctx_map = {}
-                try:
-                    with open(docs_jsonl, "r", encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                obj = json.loads(line)
-                            except Exception:
-                                continue
-                            if obj.get("type") == "figure":
-                                ipath = obj.get("image_path") or ""
-                                hint = obj.get("caption_hint") or ""
-                                if ipath and hint:
-                                    ctx_map[ipath] = hint
-                except Exception:
-                    ctx_map = {}
-
-                out_jsonl = os.path.join(pdf_dir, "pdf_images_understanding.jsonl")
-                print(f"🧠 Vision(pdf): {pdf_name} -> {out_jsonl}", flush=True)
-                understand_images(
-                    images_dir=images_dir,
-                    out_jsonl=out_jsonl,
-                    context_text="",
-                    context_map=ctx_map,
-                    ollama_host=OLLAMA_HOST,
-                    model=OLLAMA_VISION_MODEL,
-                    max_images=10000,
-                    sleep_s=0.0,
-                    dedupe=True,
-                )
-
-        set_stage(job_id, "vision_done", "Vision completed")
-    else:
-        set_stage(job_id, "vision_skipped", f"Vision skipped (model not available): {OLLAMA_VISION_MODEL}",
-                  {"available_models": models_info.get("models", [])})
-
-    # ---------- Report ----------
-    set_stage(job_id, "report", "Generating report.md...")
-    scrape_result_stub = {
-        "file_path": os.path.join(main_folder, "final_data.csv"),
-        "ocr_job_id": job_id,
-        "ocr_status_url": f"/ocr/status/{job_id}",
-        "data": [],
-    }
-    report_path = generate_report_md(main_folder=main_folder, scrape_result=scrape_result_stub)
-
-    # ---------- Ingest ----------
-    set_stage(job_id, "ingesting", "Ingesting into RAG (ChromaDB)...")
-    print(f"📦 Ingesting into Chroma: dir={CHROMA_DIR} collection={RAG_COLLECTION}", flush=True)
-    ingest_summary = ingest_scrape_folder(store=store, main_folder=main_folder)
-
-    set_stage(job_id, "ready", "Pipeline completed ✅", {
-        "main_folder": main_folder,
-        "ocr_out_root": out_root,
-        "report_path": report_path,
-        "ingest": ingest_summary,
-        "chroma_dir": os.path.abspath(CHROMA_DIR),
-        "collection": RAG_COLLECTION,
-    })
-
-
-# ----------------------------
-# Preflight / Health
-# ----------------------------
-@app.get("/health")
-def health() -> Dict[str, Any]:
-    deps = {
-        "playwright": "playwright.sync_api",
-        "bs4": "bs4",
-        "pandas": "pandas",
-        "fitz": "fitz",
-        "PIL": "PIL",
-        "paddleocr": "paddleocr",
-        "chromadb": "chromadb",
-        "requests": "requests",
-    }
-    dep_ok = {}
-    for k, mod in deps.items():
-        try:
-            importlib.import_module(mod)
-            dep_ok[k] = True
-        except Exception:
-            dep_ok[k] = False
-
-    models = ollama_models()
-    return {
-        "env_path": ENV_PATH,
-        "deps": dep_ok,
-        "ui": {
-            "dir": UI_DIR,
-            "exists": os.path.isdir(UI_DIR),
-            "index": os.path.exists(os.path.join(UI_DIR, "index.html")),
-            "app_js": os.path.exists(os.path.join(UI_DIR, "app.js")),
-            "styles": os.path.exists(os.path.join(UI_DIR, "styles.css")),
-        },
-        "ollama": {
-            "host": OLLAMA_HOST,
-            "reachable": models.get("reachable"),
-            "models": models.get("models"),
-            "llm_model": OLLAMA_LLM_MODEL,
-            "embed_model": OLLAMA_EMBED_MODEL,
-            "vision_model": OLLAMA_VISION_MODEL,
-            "vision_ok": (OLLAMA_VISION_MODEL in (models.get("models") or [])) if models.get("reachable") else False,
-        },
-        "rag": {
-            "chroma_dir": os.path.abspath(CHROMA_DIR),
-            "collection": RAG_COLLECTION,
-            "exists": os.path.isdir(CHROMA_DIR),
-        }
-    }
-
-
-@app.get("/models")
-def models() -> Dict[str, Any]:
-    return {
-        "ollama_host": OLLAMA_HOST,
-        **ollama_models()
-    }
-
-
-# ----------------------------
-# UI Serving
-# ----------------------------
-@app.get("/")
+@app.get("/", include_in_schema=False)
 def root():
     return RedirectResponse(url="/ui")
 
 
-@app.get("/ui")
+@app.get("/ui", include_in_schema=False)
 def ui_index():
     return FileResponse(os.path.join(UI_DIR, "index.html"))
 
 
-@app.get("/ui/app.js")
+@app.get("/ui/workflow", include_in_schema=False)
+def ui_workflow():
+    return FileResponse(os.path.join(UI_DIR, "workflow.html"))
+
+
+@app.get("/ui/app.js", include_in_schema=False)
 def ui_app_js():
     return FileResponse(os.path.join(UI_DIR, "app.js"))
 
 
-@app.get("/ui/styles.css")
+@app.get("/ui/workflow.js", include_in_schema=False)
+def ui_workflow_js():
+    return FileResponse(os.path.join(UI_DIR, "workflow.js"))
+
+
+@app.get("/ui/styles.css", include_in_schema=False)
 def ui_styles():
     return FileResponse(os.path.join(UI_DIR, "styles.css"))
 
-
-# ----------------------------
-# Pipeline Endpoints
-# ----------------------------
-@app.get("/pipeline/status/{job_id}")
-def pipeline_status(job_id: str) -> Dict[str, Any]:
-    return get_stage(job_id)
+@app.get("/workflow/steps")
+def workflow_steps():
+    return {"steps": get_workflow_steps()}
 
 
-# ----------------------------
-# External: scrape -> OCR -> auto postprocess+ingest
-# ----------------------------
-@app.get("/scrape")
-def scrape(keyword: str, amount: int = 5, auto_postprocess: int = 1) -> Dict[str, Any]:
-    """
-    เรียก scrape
-    - auto_postprocess=1 จะรัน postprocess+ingest อัตโนมัติหลัง OCR done
-    """
-    set_stage("GLOBAL", "scrape_called", f"keyword={keyword} amount={amount}")
-
-    print(f"🔔 /scrape keyword='{keyword}' amount={amount}", flush=True)
-    set_stage("GLOBAL", "scraping", "Scraping in progress...")
-
-    result = web_scraping.run_scraper_logic(keyword=keyword, max_links=amount)
-
-    if result.get("status") != "success":
-        return result
-
-    job_id = result.get("ocr_job_id")
-    main_folder = result.get("folder")
-
-    set_stage(job_id, "ocr_queued", "OCR queued", {"main_folder": main_folder})
-
-    # auto pipeline in background thread
-    if auto_postprocess and job_id:
-        t = threading.Thread(target=run_postprocess_and_ingest, args=(job_id,), daemon=True)
-        t.start()
-        print(f"🧩 Auto postprocess started (job_id={job_id})", flush=True)
-
-    return result
+@app.get("/jobs/{job_id}/status")
+def job_status(job_id: str):
+    return get_status(job_id)
 
 
-@app.get("/ocr/status/{job_id}")
-def ocr_status(job_id: str) -> Dict[str, Any]:
-    with web_scraping.OCR_LOCK:
-        st = web_scraping.OCR_STATUS.get(job_id)
-    if not st:
-        return {"status": "not_found", "job_id": job_id}
-    return {"job_id": job_id, **st}
+@app.get("/jobs/{job_id}/logs")
+def job_logs(job_id: str, tail: int = 200):
+    return {"job_id": job_id, "logs": get_logs(job_id, tail=tail)}
 
 
-@app.post("/postprocess/{job_id}")
-def postprocess(job_id: str) -> Dict[str, Any]:
-    """
-    กรณีอยากสั่งเอง
-    """
-    t = threading.Thread(target=run_postprocess_and_ingest, args=(job_id,), daemon=True)
-    t.start()
-    return {"status": "started", "job_id": job_id}
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "api": {"host": settings.API_HOST, "port": settings.API_PORT},
+        "paths": {"ui": "/ui", "workflow_ui": "/ui/workflow", "docs": "/docs"},
+        "db": {"database_url": settings.DATABASE_URL},
+        "models": {
+            "ollama_host": settings.OLLAMA_HOST,
+            "embed_model": settings.EMBED_MODEL,
+            "embed_dims": settings.EMBED_DIMS,
+            "blip_model": settings.BLIP_MODEL,
+        },
+        "output_dirs": {"output_base": settings.OUTPUT_BASE_DIR, "upload_dir": settings.UPLOAD_DIR},
+    }
 
 
-# ----------------------------
-# Internal: upload pdf -> OCR -> ingest
-# ----------------------------
-@app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)) -> Dict[str, Any]:
+def _run_async(coro):
+    return asyncio.run(coro)
+
+
+def _external_pipeline_thread(job_id: str, keyword: str, amount: int):
+    if sys.platform.startswith("win"):
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    try:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        set_stage(job_id, "web_scraping", f"Scraping keyword={keyword} amount={amount}")
+        log(job_id, "info", "Starting external scrape...")
+        scrape = run_external_scrape(job_id, keyword, max_links=amount)
+        main_folder = scrape["main_folder"]
+        items = scrape["items"]
+
+        set_stage(job_id, "data_collecting", "Saved web content/images/pdfs", {"main_folder": main_folder, "items": items})
+        log(job_id, "info", "External scrape complete", {"main_folder": main_folder})
+
+        # captioning per site
+        set_stage(job_id, "captioning", "Captioning images (BLIP + Argos)...")
+        for it in items:
+            site_folder = it["Folder"]
+            content_path = os.path.join(site_folder, "content.txt")
+            ctx = ""
+            if os.path.exists(content_path):
+                ctx = open(content_path, "r", encoding="utf-8", errors="ignore").read()
+
+            images_dir = os.path.join(site_folder, "images")
+            images_meta = os.path.join(images_dir, "images_meta.jsonl")
+            images_under = os.path.join(site_folder, "images_understanding.jsonl")
+
+            # ✅ เพิ่มบรรทัดนี้
+            
+            images_download_meta = os.path.join(images_dir, "images_download_meta.jsonl")
+
+            res = caption_images_with_blip_and_translate(
+                images_dir=images_dir,
+                images_meta_jsonl=images_meta,
+                images_understanding_jsonl=images_under,
+                context_text=ctx,
+                blip_model=settings.BLIP_MODEL,
+                images_download_meta_jsonl=images_download_meta,  # ✅ เพิ่มบรรทัดนี้
+                dedupe=True
+            )
+
+            log(job_id, "info", "Captioned images", {"site_folder": site_folder, **res})
+
+
+        # OCR
+        set_stage(job_id, "ocr", "OCR PDFs (PyMuPDF + PaddleOCR)...")
+        out_root = os.path.join(main_folder, "ocr_results")
+        os.makedirs(out_root, exist_ok=True)
+
+        def pcb(p: dict):
+            if p.get("stage") in ("file_start", "page_done", "file_done", "done"):
+                log(job_id, "info", "OCR progress", p)
+
+        process_folder_pdfs(files_dir=main_folder, out_root=out_root, progress_cb=pcb)
+
+        # Ingest external (✅ FIX: use thread-local store/engine)
+        set_stage(job_id, "ingest_external", "Ingest to External RAG...")
+
+        store_thread = RAGStore(
+            database_url=settings.DATABASE_URL,
+            ollama_host=settings.OLLAMA_HOST,
+            embed_model=settings.EMBED_MODEL,
+            embed_dims=settings.EMBED_DIMS
+        )
+
+        async def _ingest():
+            # กันพลาดกรณี extension/table ยังไม่พร้อม
+            await store_thread.init_db()
+            summary = await ingest_main_folder(store_thread, "external", main_folder)
+            # ปิด engine ใน loop เดียวกัน
+            await store_thread.engine.dispose()
+            return summary
+
+        ingest_summary = run_async_in_new_loop(_ingest())
+        log(job_id, "info", "Ingest external done", ingest_summary)
+
+        report_path = generate_report_md(main_folder, {
+            "job_id": job_id,
+            "keyword": keyword,
+            "namespace": "external",
+            "ingest": ingest_summary
+        })
+        log(job_id, "info", "Generated report.md", {"report_path": report_path})
+
+        set_stage(job_id, "ready", "External pipeline completed ✅", {
+            "main_folder": main_folder,
+            "ingest": ingest_summary,
+            "report_path": report_path
+        })
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        msg = f"Pipeline failed: {type(e).__name__}: {repr(e)}"
+        set_stage(job_id, "error", msg)
+        log(job_id, "error", "Pipeline exception", {"error": repr(e), "type": type(e).__name__, "traceback": tb})
+
+
+@app.post("/pipeline/external/scrape")
+def start_external_scrape(payload: Dict[str, Any] = Body(...)):
+    keyword = (payload.get("keyword") or "").strip()
+    amount = int(payload.get("amount") or 5)
+    if not keyword:
+        return {"status": "bad_request", "message": "keyword required"}
+
     job_id = uuid.uuid4().hex[:12]
-    base = os.path.join(OUTPUT_BASE_DIR, "internal_uploads", job_id)
-    os.makedirs(base, exist_ok=True)
+    new_job(job_id, kind="external_pipeline")
+    log(job_id, "info", "Job created")
 
-    raw_path = os.path.join(base, file.filename)
-    with open(raw_path, "wb") as f:
+    t = threading.Thread(target=_external_pipeline_thread, args=(job_id, keyword, amount), daemon=True)
+    t.start()
+
+    return {"status": "ok", "job_id": job_id}
+
+
+@app.post("/facebook/scrape_post")
+def facebook_scrape_post(payload: Dict[str, Any] = Body(...)):
+    url = (payload.get("url") or "").strip()
+    headless = bool(payload.get("headless", True))
+    if not url:
+        return {"status": "bad_request", "message": "url required"}
+    job_id = uuid.uuid4().hex[:12]
+    new_job(job_id, kind="facebook_scrape")
+    set_stage(job_id, "web_scraping", "Scraping Facebook with login session...")
+    try:
+        out = scrape_facebook_post_html(job_id, url, headless=headless)
+        set_stage(job_id, "ready", "Facebook scrape done ✅", {"final_url": out["final_url"]})
+        return {"status": "ok", "job_id": job_id, "final_url": out["final_url"], "html_len": len(out["html"])}
+    except Exception as e:
+        set_stage(job_id, "error", f"Facebook scrape failed: {e}")
+        return {"status": "error", "job_id": job_id, "error": str(e)}
+
+
+@app.post("/pipeline/internal/upload_pdf")
+async def upload_pdf(file: UploadFile = File(...), entity_hint: str = "internal_doc"):
+    """
+    ✅ แก้: เก็บไฟล์ลงโฟลเดอร์เฉพาะ job แล้ว OCR เฉพาะโฟลเดอร์นั้น
+    """
+    job_id = uuid.uuid4().hex[:12]
+    new_job(job_id, kind="internal_pipeline")
+
+    job_dir = os.path.join(settings.UPLOAD_DIR, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    set_stage(job_id, "data_collecting", "Uploading file...")
+    save_path = os.path.join(job_dir, file.filename)
+    with open(save_path, "wb") as f:
         f.write(await file.read())
+    log(job_id, "info", "Saved upload", {"path": save_path})
 
-    set_stage(job_id, "upload_saved", "File saved", {"saved_path": raw_path})
-
-    import ocr_pipeline
-    out_root = os.path.join(base, "ocr_results")
+    # OCR
+    set_stage(job_id, "ocr", "OCR uploaded pdf...")
+    out_root = os.path.join(job_dir, "ocr_results")
     os.makedirs(out_root, exist_ok=True)
 
-    set_stage(job_id, "ocr_running", "OCR running for uploaded PDF...")
-    ocr_pipeline.process_folder_pdfs(files_dir=base, out_root=out_root, progress_cb=None)
+    def pcb(p: dict):
+        if p.get("stage") in ("file_start", "page_done", "file_done", "done"):
+            log(job_id, "info", "OCR progress", p)
 
-    set_stage(job_id, "ingesting", "Ingesting upload into RAG...")
-    ingest_summary = ingest_scrape_folder(store=store, main_folder=base)
+    # ✅ OCR เฉพาะ job_dir (ไม่สแกนทั้ง tmp_uploads/)
+    process_folder_pdfs(files_dir=job_dir, out_root=out_root, progress_cb=pcb)
 
-    set_stage(job_id, "ready", "Upload pipeline completed ✅", {
-        "saved_path": raw_path,
-        "ocr_out_root": out_root,
-        "ingest": ingest_summary,
-        "chroma_dir": os.path.abspath(CHROMA_DIR),
-        "collection": RAG_COLLECTION,
+    # ingest internal from OCR output
+    set_stage(job_id, "ingest_internal", "Ingesting to Internal RAG...")
+    added_chunks = added_facts = 0
+
+    from backend.utils.jsonl import iter_jsonl
+
+    for root, _, files in os.walk(out_root):
+        for fn in files:
+            if fn == "docs.jsonl":
+                docs = os.path.join(root, fn)
+                for obj in iter_jsonl(docs) or []:
+                    if obj.get("type") == "page_text":
+                        r = await ingest_text_blob(
+                            store, "internal",
+                            obj.get("text") or "",
+                            meta={
+                                "source_type": "internal_pdf_page",
+                                "source_path": save_path,
+                                "page": int(obj.get("page") or 0),
+                                "extract_method": obj.get("extract_method") or "",
+                            },
+                            entity_hint=entity_hint
+                        )
+                        added_chunks += r["chunks"]
+                        added_facts += r["facts"]
+
+    set_stage(job_id, "ready", "Internal ingest completed ✅", {
+        "upload_path": save_path,
+        "added_chunks": added_chunks,
+        "added_facts": added_facts
     })
+    return {"status": "ok", "job_id": job_id, "upload_path": save_path, "added_chunks": added_chunks, "added_facts": added_facts}
 
-    return get_stage(job_id)
 
-
-# ----------------------------
-# Ask (Agentic RAG)
-# ----------------------------
 @app.post("/ask")
-def ask(payload: Dict[str, Any]) -> Dict[str, Any]:
+async def ask(payload: Dict[str, Any] = Body(...)):
     q = (payload.get("question") or "").strip()
     if not q:
         return {"status": "bad_request", "message": "question required"}
-    top_k = int(payload.get("top_k") or 10)
-    out = agent.answer(question=q, top_k=top_k)
+    top_k = int(payload.get("top_k") or settings.RAG_TOP_K)
+    out = await agent.answer(q, top_k=top_k)
     return {"status": "ok", **out}
 
 
-# ----------------------------
-# Run
-# ----------------------------
+@app.get("/rag/preview")
+async def rag_preview(namespace: str = "external", source_type: str = "", limit: int = 30):
+    chunks = await store.preview_chunks(namespace=namespace, source_type=source_type, limit=limit)
+    return {"status": "ok", "namespace": namespace, "count": len(chunks), "chunks": chunks}
+
+
+@app.post("/rag/reset")
+async def rag_reset():
+    await store.reset_db()
+    return {"status": "ok", "message": "db reset done"}
+
+
+@app.post("/eval/run")
+async def eval_run(payload: Dict[str, Any] = Body(...)):
+    dataset_path = (payload.get("dataset_path") or "").strip()
+    namespace = (payload.get("namespace") or "external").strip()
+    k = int(payload.get("k") or 5)
+    if not dataset_path or not os.path.exists(dataset_path):
+        return {"status": "bad_request", "message": "dataset_path not found"}
+    results = await run_eval(store, dataset_path, namespace, k=k)
+    return {"status": "ok", "namespace": namespace, "k": k, "results": results}
+
+def run_async_in_new_loop(coro):
+    """Run async coroutine in a fresh event loop (safe for threads)."""
+    return asyncio.run(coro)
+
+
+
 if __name__ == "__main__":
     import uvicorn
-    print(f"\n✅ Swagger UI: http://localhost:{API_PORT}/docs")
-    print(f"✅ UI:         http://localhost:{API_PORT}/ui")
-    print(f"✅ Health:     http://localhost:{API_PORT}/health")
-    print(f"✅ Models:     http://localhost:{API_PORT}/models\n")
-    uvicorn.run("main:app", host=API_HOST, port=API_PORT, reload=True)
+    print(f"✅ Swagger: http://localhost:{settings.API_PORT}/docs")
+    print(f"✅ UI:      http://localhost:{settings.API_PORT}/ui")
+    print(f"✅ Flow UI: http://localhost:{settings.API_PORT}/ui/workflow")
+    uvicorn.run("backend.main:app", host=settings.API_HOST, port=settings.API_PORT, reload=True)

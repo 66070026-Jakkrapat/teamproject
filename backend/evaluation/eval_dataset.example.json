@@ -1,0 +1,10 @@
+[
+  {
+    "question": "บริษัทมีแนวทางด้านความยั่งยืนอย่างไร",
+    "relevant_chunks": ["sustainability", "esg", "carbon", "environment", "ความยั่งยืน"]
+  },
+  {
+    "question": "จำนวนพนักงานของบริษัทเท่าไหร่",
+    "relevant_chunks": ["employees", "พนักงาน", "headcount"]
+  }
+]
