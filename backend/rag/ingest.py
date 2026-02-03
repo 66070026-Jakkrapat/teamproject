@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import asyncio
 from typing import Any, Dict, List, Tuple
 
@@ -19,6 +20,98 @@ from backend.rag.structured_extractor import extract_facts_llm
 EMBED_MAX_CHARS = 5000
 EMBED_OVERLAP = 200
 
+_MENU_LINE_MAX_CHARS = 40
+_MENU_WORD_MAX = 6
+
+def _load_page_meta(site_folder: str) -> Dict[str, Any]:
+    """Read page_meta.json written by scraper (best-effort)."""
+    p = os.path.join(site_folder, "page_meta.json")
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+def _looks_like_menu_line(line: str) -> bool:
+    """
+    Heuristic: เมนู/ฟุตเตอร์มักเป็นบรรทัดสั้นๆ, คำไม่เยอะ, ไม่มี ., ไม่มีเลขหัวข้อ, ไม่มีประโยค
+    """
+    s = (line or "").strip()
+    if not s:
+        return True
+
+    # ถ้ามีประโยค/ตัวเลข/จุด/โคลอน มักเป็นเนื้อหา
+    if re.search(r"\d", s):
+        return False
+    if any(x in s for x in [".", ":", "–", "-", "(", ")", "%"]):
+        return False
+
+    # บรรทัดสั้นมาก + คำไม่กี่คำ = มีโอกาสเป็นเมนู
+    if len(s) <= _MENU_LINE_MAX_CHARS:
+        words = re.split(r"\s+", s)
+        if len(words) <= _MENU_WORD_MAX:
+            # เมนูมักเป็น Title Case/คำเดี่ยว ๆ
+            return True
+
+    return False
+
+def _clean_web_text_for_rag(text: str) -> str:
+    """
+    - ลบบรรทัดเมนู/ขยะจำนวนมาก (โดยเฉพาะช่วงติด ๆ กัน)
+    - เก็บบรรทัดที่เป็นเนื้อหาจริง
+    """
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    out = []
+    bad_run = 0
+
+    for ln in lines:
+        if not ln:
+            continue
+
+        if _looks_like_menu_line(ln):
+            bad_run += 1
+            # ถ้าเมนูติดกันยาว ๆ ให้ทิ้งไปเรื่อย ๆ
+            continue
+        else:
+            bad_run = 0
+            out.append(ln)
+
+    return "\n".join(out).strip()
+
+_SECTION_SPLIT_RE = re.compile(r"(?m)^\s*(\d{1,2})\.\s+")
+def _split_by_numbered_sections(text: str) -> List[str]:
+    """
+    แยกเอกสารที่มีหัวข้อ 1. 2. 3. ... ให้หัวข้ออยู่เป็นก้อน ๆ
+    ช่วยมากสำหรับบทความ “5 เทรนด์/12 เทรนด์”
+    """
+    t = (text or "").strip()
+    if not t:
+        return []
+
+    # ถ้าไม่มี pattern เลย ก็คืนเป็นก้อนเดียว
+    if not _SECTION_SPLIT_RE.search(t):
+        return [t]
+
+    parts = []
+    # split แต่ต้องเก็บเลขหัวข้อไว้ด้วย
+    chunks = _SECTION_SPLIT_RE.split(t)
+    # chunks รูปแบบ: [ก่อนหัวข้อแรก, "1", เนื้อหา1, "2", เนื้อหา2, ...]
+    head = (chunks[0] or "").strip()
+    if head:
+        parts.append(head)
+
+    i = 1
+    while i + 1 < len(chunks):
+        num = chunks[i].strip()
+        body = (chunks[i + 1] or "").strip()
+        if body:
+            parts.append(f"{num}. {body}")
+        i += 2
+
+    return [p.strip() for p in parts if p.strip()]
 
 def _split_by_chars(text: str, max_chars: int = EMBED_MAX_CHARS, overlap: int = EMBED_OVERLAP) -> List[str]:
     """
@@ -272,21 +365,55 @@ async def ingest_site_folder(store: RAGStore, namespace: str, site_folder: str) 
     # ---------------------------
     content_path = os.path.join(site_folder, "content.txt")
     if os.path.exists(content_path):
-        text = open(content_path, "r", encoding="utf-8", errors="ignore").read()
-        r = await ingest_text_blob(
-            store,
-            namespace,
-            text,
-            {
-                "source_type": "web_page",
-                "source_path": content_path,
-                "source_url": "",
-                "page": 0,
-            },
-            entity_hint="web_page",
-        )
-        total_chunks += r["chunks"]
-        total_facts += r["facts"]
+        raw = open(content_path, "r", encoding="utf-8", errors="ignore").read()
+
+        # ✅ 1) โหลด meta จาก scraper
+        page_meta = _load_page_meta(site_folder)
+        source_url = (page_meta.get("source_url") or "").strip()
+        page_title = (page_meta.get("title") or "").strip()
+
+        # ✅ 2) ล้างเมนู/ขยะก่อน
+        cleaned = _clean_web_text_for_rag(raw)
+
+        # ✅ 3) split ตามหัวข้อเลข เพื่อให้ “เทรนด์ 1–5/1–12” อยู่เป็นก้อนชัด ๆ
+        sections = _split_by_numbered_sections(cleaned)
+
+        # ถ้า split แล้วได้หลาย section: ingest ทีละ section จะ retrieval ตรงกว่ามาก
+        if len(sections) > 1:
+            for si, sec in enumerate(sections, start=1):
+                r = await ingest_text_blob(
+                    store,
+                    namespace,
+                    sec,
+                    {
+                        "source_type": "web_page",
+                        "source_path": content_path,
+                        "source_url": source_url,
+                        "page": 0,
+                        "page_title": page_title,
+                        "section_index": si,
+                        "section_total": len(sections),
+                    },
+                    entity_hint="web_page",
+                )
+                total_chunks += r["chunks"]
+                total_facts += r["facts"]
+        else:
+            r = await ingest_text_blob(
+                store,
+                namespace,
+                cleaned,
+                {
+                    "source_type": "web_page",
+                    "source_path": content_path,
+                    "source_url": source_url,
+                    "page": 0,
+                    "page_title": page_title,
+                },
+                entity_hint="web_page",
+            )
+            total_chunks += r["chunks"]
+            total_facts += r["facts"]
 
     # ---------------------------
     # Image understanding captions (already short)

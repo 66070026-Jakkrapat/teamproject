@@ -88,6 +88,42 @@ def snippets_to_text(results: list[dict], max_chars: int = 7000) -> str:
         total += len(block) + 1
     return "\n\n".join(out)
 
+def infer_prefer_domain(question: str) -> str:
+    """
+    บางคำถามควร prefer แหล่งเฉพาะ เพื่อไม่ให้เว็บอื่น (เช่น KTC 12 trends)
+    มาบดทับบทความ ttb 5 trends
+    """
+    q = (question or "").lower()
+    th = question or ""
+    if ("5" in q or "ห้า" in th) and ("เทรนด์" in th or "trend" in q) and ("sme" in q or "เอสเอ็มอี" in th):
+        return "ttbbank.com"
+    if "ttb" in q or "finbiz" in q:
+        return "ttbbank.com"
+    return ""
+
+
+def is_context_sufficient(chunks: List[RetrievedChunk], ctx: str) -> bool:
+    """
+    ตัดสินว่าควรตอบจาก RAG ได้แล้วหรือยัง
+    - อย่าใช้ score อย่างเดียว เพราะ L2 score มักต่ำ (0.07-0.10)
+    """
+    if not ctx or not ctx.strip():
+        return False
+    if not chunks:
+        return False
+
+    # heuristic: ถ้ามีข้อความรวมพอสมควร ก็พอตอบสรุปได้
+    if len(ctx) >= 900:
+        return True
+
+    # ถ้าสั้น แต่มีหลาย chunk ก็ยังพอได้
+    if len(chunks) >= 3:
+        return True
+
+    # ถ้ามี chunk เดียว ต้องให้ score พอประมาณ (ลด threshold ลง)
+    top_score = float(chunks[0].score or 0.0)
+    return top_score >= 0.06
+
 
 class AgenticRAG:
     def __init__(self, store: RAGStore):
@@ -126,36 +162,81 @@ class AgenticRAG:
                     return {"route": "structured_rag", "answer": "\n".join(lines), "chunks": [], "tavily_used": False}
             route = "semantic_rag"
 
+        # -------- semantic rag --------
         all_chunks: List[RetrievedChunk] = []
         for ns in namespaces_order:
-            chunks = await self.store.query_semantic(ns, question, top_k=top_k)
+            chunks = await self.store.query_semantic(ns, question, top_k=max(top_k, 12))
             all_chunks.extend(chunks)
 
-        all_chunks = sorted(all_chunks, key=lambda x: x.score, reverse=True)[:top_k]
+        # sort by score desc
+        all_chunks = sorted(all_chunks, key=lambda x: float(x.score or 0.0), reverse=True)
+
+        # ✅ prefer domain (กัน KTC/เว็บอื่นกลบ ttb)
+        prefer_domain = infer_prefer_domain(question)
+        if prefer_domain:
+            filtered = [
+                c for c in all_chunks
+                if prefer_domain in ((c.meta or {}).get("source_url", "") + " " + (c.meta or {}).get("source_path", ""))
+            ]
+            if filtered:
+                all_chunks = filtered
+
+        all_chunks = all_chunks[:top_k]
         ctx = format_context(all_chunks, limit_chars=8500)
 
+        # ถ้ามี context -> พยายามตอบจาก RAG ก่อนเสมอ
         if ctx.strip():
             try:
                 ans = await self.llm.generate(SYNTH_PROMPT.format(question=question, context=ctx))
-                low = (len(all_chunks) == 0) or (all_chunks[0].score < 0.12)
-                if low:
-                    return await self._tavily_fallback(question, all_chunks)
-                return {"route": "semantic_rag", "answer": ans, "chunks": [c.meta for c in all_chunks], "tavily_used": False}
-            except Exception:
+
+                # ✅ ถ้าพอแล้ว ให้ตอบเลย (ไม่สนใจ score threshold แข็งๆ)
+                if is_context_sufficient(all_chunks, ctx):
+                    return {
+                        "route": "semantic_rag",
+                        "answer": ans,
+                        "chunks": [c.meta for c in all_chunks],
+                        "tavily_used": False
+                    }
+
+                # ✅ ถ้ายังไม่พอจริงๆ ค่อย fallback (แต่ต้อง handle Tavily missing แบบไม่ล้ม)
                 return await self._tavily_fallback(question, all_chunks)
 
+            except Exception:
+                # ถ้า LLM พัง ค่อย fallback
+                return await self._tavily_fallback(question, all_chunks)
+
+        # ไม่มี context เลย -> fallback
         return await self._tavily_fallback(question, all_chunks)
 
+
     async def _tavily_fallback(self, question: str, chunks: List[RetrievedChunk]) -> Dict[str, Any]:
+        # ✅ ถ้า Tavily ใช้ไม่ได้ แต่เรายังมี RAG chunks -> สรุปจาก RAG แทน (ไม่ล้ม)
         t = tavily_search(question, max_results=settings.TAVILY_MAX_RESULTS)
         if not t.get("ok"):
+            # ถ้ามี chunks ให้ลอง synth จาก RAG อีกครั้งแบบ "best effort"
+            ctx = format_context(chunks, limit_chars=8500)
+            if ctx.strip():
+                try:
+                    ans = await self.llm.generate(SYNTH_PROMPT.format(question=question, context=ctx))
+                    # ใส่หมายเหตุให้รู้ว่า Tavily ใช้ไม่ได้ แต่เราตอบจาก RAG
+                    ans = ans.strip() + f"\n\nหมายเหตุ: Tavily ใช้งานไม่ได้ ({t.get('error')}) จึงตอบจาก RAG เท่าที่มี"
+                    return {
+                        "route": "semantic_rag",
+                        "answer": ans,
+                        "chunks": [c.meta for c in chunks],
+                        "tavily_used": False
+                    }
+                except Exception:
+                    pass
+
             return {
                 "route": "tavily_fallback",
                 "answer": f"ไม่พบข้อมูลเพียงพอใน RAG และ Tavily ใช้งานไม่ได้: {t.get('error')}",
                 "chunks": [c.meta for c in chunks],
-                "tavily_used": True
+                "tavily_used": False
             }
 
+        # ✅ Tavily ใช้งานได้ตามปกติ
         results = t.get("results", [])
         snippets = snippets_to_text(results)
 
@@ -171,3 +252,4 @@ class AgenticRAG:
             "tavily_used": True,
             "tavily_results": results[: settings.TAVILY_MAX_RESULTS]
         }
+
