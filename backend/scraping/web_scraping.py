@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import io
+import json
 import time
 import random
 import hashlib
@@ -11,7 +12,7 @@ import traceback
 import unicodedata
 import base64
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin, quote, urlparse, parse_qs, unquote
+from urllib.parse import urljoin, urlparse, parse_qs, unquote
 
 import requests
 import pandas as pd
@@ -69,15 +70,151 @@ ALLOWED_FILE_CT = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
 }
 
+# ── ค่า threshold: ถ้า PyMuPDF extract ได้ text น้อยกว่านี้ต่อหน้า → fallback OCR
+PDF_MIN_CHARS_PER_PAGE = 50
+
+
+def extract_pdf_text(
+    pdf_path: str,
+    ocr_lang: str = "th",
+    min_chars_per_page: int = PDF_MIN_CHARS_PER_PAGE,
+) -> str:
+    """
+    Extract text จาก PDF โดย:
+    1. ลอง PyMuPDF ก่อน (เร็ว เหมาะกับ digital PDF)
+    2. ถ้าหน้าไหน text น้อยกว่า min_chars_per_page → แปลงเป็นภาพแล้วใช้ PaddleOCR
+
+    Args:
+        pdf_path: path ของไฟล์ PDF
+        ocr_lang: ภาษาสำหรับ PaddleOCR เช่น "th", "en", "ch"
+        min_chars_per_page: threshold ตัดสินว่าหน้าไหนต้อง OCR
+
+    Returns:
+        str: text ทั้งหมดจาก PDF (ทุกหน้า)
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        raise ImportError("PyMuPDF not installed: pip install pymupdf")
+
+    all_pages: List[str] = []
+    ocr_model = None  # lazy init — สร้าง PaddleOCR เมื่อต้องใช้จริงเท่านั้น
+
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as e:
+        raise RuntimeError(f"Cannot open PDF: {pdf_path} — {e}")
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+
+        # ── Step 1: PyMuPDF extract text ──────────────────────────────
+        mupdf_text = (page.get_text("text") or "").strip()
+
+        if len(mupdf_text) >= min_chars_per_page:
+            # ✅ digital PDF — ใช้ text จาก PyMuPDF เลย
+            all_pages.append(mupdf_text)
+            continue
+
+        # ── Step 2: น้อยกว่า threshold → OCR ────────────────────────
+        try:
+            if ocr_model is None:
+                try:
+                    from paddleocr import PaddleOCR
+                except ImportError:
+                    raise ImportError("PaddleOCR not installed: pip install paddleocr")
+                # use_angle_cls=True ช่วยรองรับข้อความหมุน
+                ocr_model = PaddleOCR(use_angle_cls=True, lang=ocr_lang, show_log=False)
+
+            # แปลง page เป็นภาพ (300 dpi)
+            mat = fitz.Matrix(300 / 72, 300 / 72)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img_bytes = pix.tobytes("png")
+
+            # PaddleOCR รับ numpy array หรือ bytes
+            import numpy as np
+            from PIL import Image as PILImage
+
+            img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+            img_np = np.array(img)
+
+            result = ocr_model.ocr(img_np, cls=True)
+
+            ocr_lines: List[str] = []
+            if result:
+                for line_group in result:
+                    if not line_group:
+                        continue
+                    for line in line_group:
+                        # line = [[box], [text, confidence]]
+                        if line and len(line) >= 2:
+                            txt = (line[1][0] or "").strip()
+                            if txt:
+                                ocr_lines.append(txt)
+
+            ocr_text = "\n".join(ocr_lines).strip()
+            all_pages.append(ocr_text if ocr_text else mupdf_text)
+
+        except Exception as ocr_err:
+            # OCR ล้มเหลว → ใช้ mupdf_text แม้จะสั้น
+            all_pages.append(mupdf_text)
+
+    doc.close()
+
+    # รวมทุกหน้า คั่นด้วย newline สองชั้น
+    return "\n\n".join(p for p in all_pages if p).strip()
+
+
+def extract_pdfs_in_folder(
+    files_dir: str,
+    pdf_texts_dir: str,
+    ocr_lang: str = "th",
+) -> List[Dict[str, Any]]:
+    """
+    วน extract text จากทุก PDF ใน files_dir
+    บันทึกผลเป็น .txt แต่ละไฟล์ใน pdf_texts_dir
+
+    Returns:
+        List of { "pdf_path", "txt_path", "char_count", "error" }
+    """
+    safe_mkdir(pdf_texts_dir)
+    results: List[Dict[str, Any]] = []
+
+    pdf_files = [
+        f for f in os.listdir(files_dir)
+        if f.lower().endswith(".pdf")
+    ]
+
+    for pdf_file in pdf_files:
+        pdf_path = os.path.join(files_dir, pdf_file)
+        txt_filename = os.path.splitext(pdf_file)[0] + ".txt"
+        txt_path = os.path.join(pdf_texts_dir, txt_filename)
+
+        try:
+            text = extract_pdf_text(pdf_path, ocr_lang=ocr_lang)
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            results.append({
+                "pdf_path": pdf_path,
+                "txt_path": txt_path,
+                "char_count": len(text),
+                "error": None,
+            })
+        except Exception as e:
+            results.append({
+                "pdf_path": pdf_path,
+                "txt_path": "",
+                "char_count": 0,
+                "error": str(e),
+            })
+
+    return results
+
 
 # ============================================================
-# Playwright Session (เปิดครั้งเดียว ใช้ต่อเนื่อง)
+# Playwright Session
 # ============================================================
 class PlaywrightSession:
-    """
-    เปิด Playwright + Persistent Browser Context + Page ครั้งเดียว
-    แล้ว reuse page เดิมสำหรับ: Google search + scrape หลาย URL
-    """
     def __init__(self, job_id: str):
         self.job_id = job_id
         self._p = None
@@ -91,28 +228,23 @@ class PlaywrightSession:
 
         user_data_dir = getattr(settings, "BROWSER_USER_DATA_DIR", None)
         if not user_data_dir:
-            user_data_dir = os.path.join(getattr(settings, "OUTPUT_BASE_DIR", os.getcwd()), "chrome_user_data")
+            user_data_dir = os.path.join(
+                getattr(settings, "OUTPUT_BASE_DIR", os.getcwd()), "chrome_user_data"
+            )
         safe_mkdir(user_data_dir)
-
-        args = [
-            "--start-maximized",
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-        ]
 
         self._p = sync_playwright().start()
         self.context = self._p.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
             headless=headless,
             slow_mo=slowmo,
-            channel=channel,                 # "chrome" จะเหมือน ww.py (ถ้ามี)
-            args=args,
-            viewport=None,                   # หน้าจอจริง
+            channel=channel,
+            args=["--start-maximized", "--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            viewport=None,
             locale="th-TH",
             user_agent=USER_AGENT,
             ignore_https_errors=True,
         )
-
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         return self
 
@@ -146,8 +278,7 @@ def _sha1_bytes(b: bytes) -> str:
 
 
 def safe_filename(name: str, max_len: int = 60) -> str:
-    name = (name or "")
-    name = unicodedata.normalize("NFKC", name)
+    name = unicodedata.normalize("NFKC", name or "")
     name = re.sub(r"[\\/*?\"<>|:]", "", name)
     name = re.sub(r"\s+", " ", name).strip()
     name = name[:max_len].rstrip(" .").strip()
@@ -158,20 +289,13 @@ def is_probably_blocked(text: str) -> bool:
     t = (text or "").lower().strip()
     if any(k in t for k in BLOCK_KEYWORDS):
         return True
-    # ถ้าเนื้อหาสั้นมากก็มีโอกาสโดนบล็อก/เจอ consent page
-    if len(t) < 250:
-        return True
-    return False
+    return len(t) < 250
 
 
 def _normalize_visible_text(raw: str, min_line_len: int = 10) -> str:
-    """
-    สรุป: ทำให้ได้ text “ที่มองเห็นจริง” และกันซ้ำเยอะ ๆ
-    """
     raw = (raw or "").strip()
     if not raw:
         return ""
-
     s = unicodedata.normalize("NFKC", raw)
     s = s.replace("\u00a0", " ")
     s = re.sub(r"[^\S\r\n]+", " ", s)
@@ -189,7 +313,6 @@ def _normalize_visible_text(raw: str, min_line_len: int = 10) -> str:
             continue
         seen.add(key)
         lines.append(line)
-
     return "\n".join(lines)
 
 
@@ -200,7 +323,6 @@ def content_text_from_html(html: str) -> str:
     for tag_name in ["header", "footer", "nav", "aside"]:
         for t in soup.find_all(tag_name):
             t.decompose()
-
     main = soup.find("article") or soup.find("main") or soup.body
     text = main.get_text("\n", strip=True) if main else soup.get_text("\n", strip=True)
     return normalize_text(text)
@@ -217,161 +339,92 @@ def extract_page_title(html: str) -> str:
     h1 = soup.find("h1")
     return h1.get_text(" ", strip=True) if h1 else ""
 
+
 def _is_junk_node(tag) -> bool:
     try:
         cid = " ".join([tag.get("id") or "", " ".join(tag.get("class") or [])]).strip()
     except Exception:
         cid = ""
-    if cid and JUNK_CLASS_ID_RE.search(cid):
-        return True
-    return False
+    return bool(cid and JUNK_CLASS_ID_RE.search(cid))
 
 
 def _drop_junk_blocks(soup: BeautifulSoup) -> None:
-    # ตัด tag ที่เป็นขยะชัวร์ ๆ
     for t in soup(["script", "style", "noscript", "svg", "canvas", "iframe"]):
         t.decompose()
-
-    # ตัด block ตามชื่อ tag ที่มักไม่ใช่เนื้อหา
     for tag_name in ["header", "footer", "nav", "aside", "form"]:
         for t in soup.find_all(tag_name):
             t.decompose()
-
-    # ตัด div/section ที่ชื่อคลาส/ไอดีเข้าข่าย “ขยะ”
     for t in soup.find_all(True):
         if _is_junk_node(t):
             t.decompose()
 
 
-def _text_len(s: str) -> int:
-    return len((s or "").strip())
-
-
 def _get_text_and_link_len(node) -> tuple[int, int, int]:
-    """
-    return: (text_len, link_text_len, blocks_count)
-    blocks_count ~ จำนวน p/h/li เพื่อให้ชอบบทความมากกว่าเมนู
-    """
-    # text รวม
     txt = node.get_text("\n", strip=True)
-    text_len = _text_len(txt)
-
-    # text ของลิงก์ (เมนูมักเป็นลิงก์เยอะ)
-    link_text_len = 0
-    for a in node.find_all("a"):
-        link_text_len += _text_len(a.get_text(" ", strip=True))
-
+    text_len = len(txt.strip())
+    link_text_len = sum(len(a.get_text(" ", strip=True)) for a in node.find_all("a"))
     blocks_count = len(node.find_all(["p", "h1", "h2", "h3", "h4", "li"]))
     return text_len, link_text_len, blocks_count
 
 
 def _pick_best_main_container(soup: BeautifulSoup):
-    """
-    เลือกก้อนที่น่าจะเป็นเนื้อหาหลัก:
-    - text ยาว
-    - link density ต่ำ
-    - มี p/h/li เยอะ
-    """
-    # candidates ที่เป็นไปได้
     candidates = []
-
-    # ตัวที่ “มักจะใช่” ก่อน
-    preferred = soup.select("article, main, [role='main']")
-    for n in preferred:
-        if _is_junk_node(n):
-            continue
-        candidates.append(n)
-
-    # เพิ่ม div/section (ใช้เป็น fallback)
+    for n in soup.select("article, main, [role='main']"):
+        if not _is_junk_node(n):
+            candidates.append(n)
     for n in soup.select("section, div"):
-        if _is_junk_node(n):
-            continue
-        candidates.append(n)
+        if not _is_junk_node(n):
+            candidates.append(n)
 
-    best = None
-    best_score = -1.0
-
+    best, best_score = None, -1.0
     for n in candidates:
         try:
             tlen, llen, blocks = _get_text_and_link_len(n)
-            if tlen < 400:  # สั้นไป มักเป็นเมนู/กล่องข้าง
+            if tlen < 400:
                 continue
-
-            # link density
-            ld = (llen / max(tlen, 1))
-
-            # คะแนน: เอา “ข้อความที่ไม่ใช่ลิงก์” เป็นแกน + โบนัสตาม blocks
-            net = max(tlen - llen, 0)
-            score = net * (1.0 - min(ld, 0.95)) * (1.0 + min(blocks, 60) / 12.0)
-
-            # ถ้าลิงก์หนาแน่นมาก ให้ลงโทษ
+            ld = llen / max(tlen, 1)
+            score = max(tlen - llen, 0) * (1.0 - min(ld, 0.95)) * (1.0 + min(blocks, 60) / 12.0)
             if ld > 0.55:
                 score *= 0.25
-
             if score > best_score:
                 best_score = score
                 best = n
         except Exception:
             continue
-
     return best or (soup.find("article") or soup.find("main") or soup.body or soup)
 
 
 def _drop_boilerplate_lines(text: str) -> str:
-    """
-    ตัดบรรทัดที่เป็นคุกกี้/ฟุตเตอร์/โทร/ลิงก์บริการ ฯลฯ
-    """
     if not text:
         return ""
-
     lines = [ln.strip() for ln in text.splitlines()]
-    out = []
-    seen = set()
-
+    out, seen = [], set()
     for ln in lines:
         if len(ln) < 8:
             continue
-
-        # ตัดบรรทัดที่เป็นขยะตาม regex
-        bad = False
-        for rx in BOILERPLATE_LINE_RE:
-            if rx.search(ln):
-                bad = True
-                break
-        if bad:
+        if any(rx.search(ln) for rx in BOILERPLATE_LINE_RE):
             continue
-
-        # ตัดบรรทัดที่เหมือนเมนู: คำสั้น ๆ หลายคำต่อกัน (เช่น "Rates and Fees", "Contact", ...)
         words = re.split(r"\s+", ln)
         if len(words) >= 6 and sum(1 for w in words if len(w) <= 4) / max(len(words), 1) > 0.65:
             continue
-
-        # กันซ้ำ
         key = re.sub(r"\s+", " ", ln).lower()
         if key in seen:
             continue
         seen.add(key)
         out.append(ln)
-
     return "\n".join(out)
 
 
 def content_main_text_from_html(html: str) -> str:
     soup = BeautifulSoup(html or "", "html.parser")
     _drop_junk_blocks(soup)
-
     main = _pick_best_main_container(soup)
     text = main.get_text("\n", strip=True) if main else soup.get_text("\n", strip=True)
+    return _drop_boilerplate_lines(normalize_text(text)).strip()
 
-    # normalize_text ของคุณ + ตัด boilerplate
-    text = normalize_text(text)
-    text = _drop_boilerplate_lines(text)
-
-    # บางเว็บบรรทัดหัวข้อ/ย่อหน้าอาจหาย ให้กันสั้นเกินไป
-    return text.strip()
 
 # ----------------------------
-# Files
+# Files & Images
 # ----------------------------
 def looks_like_file_url(u: str) -> bool:
     ul = (u or "").lower()
@@ -381,12 +434,10 @@ def looks_like_file_url(u: str) -> bool:
 def extract_file_links(html: str, base_url: str) -> List[str]:
     soup = BeautifulSoup(html or "", "html.parser")
     links: List[str] = []
-
     for a in soup.find_all("a", href=True):
         full = urljoin(base_url, a.get("href"))
         if full.startswith("http") and looks_like_file_url(full):
             links.append(full)
-
     for tag in soup.select("[onclick]"):
         onclick = tag.get("onclick") or ""
         m = re.search(r"""['"]([^'"]+)['"]""", onclick)
@@ -394,13 +445,11 @@ def extract_file_links(html: str, base_url: str) -> List[str]:
             full = urljoin(base_url, m.group(1))
             if full.startswith("http") and looks_like_file_url(full):
                 links.append(full)
-
     uniq, seen = [], set()
     for u in links:
-        if u in seen:
-            continue
-        seen.add(u)
-        uniq.append(u)
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
     return uniq
 
 
@@ -414,7 +463,6 @@ def download_files_via_requests(urls: List[str], save_folder: str, base_url: str
     count = 0
     sess = requests.Session()
     sess.headers.update({"User-Agent": USER_AGENT, "Referer": base_url})
-
     for u in urls:
         if count >= max_files:
             break
@@ -422,15 +470,12 @@ def download_files_via_requests(urls: List[str], save_folder: str, base_url: str
             resp = sess.get(u, timeout=30, stream=True)
             if not resp.ok:
                 continue
-
             ct = (resp.headers.get("content-type") or "").lower()
             if "text/html" in ct:
                 continue
-
             data = resp.content
             if not data or len(data) < 10 * 1024:
                 continue
-
             ext = guess_ext_from_ct(ct)
             outp = os.path.join(save_folder, f"file_{count+1}_{random.randint(100,999)}{ext}")
             with open(outp, "wb") as f:
@@ -441,41 +486,31 @@ def download_files_via_requests(urls: List[str], save_folder: str, base_url: str
     return count
 
 
-# ----------------------------
-# Images
-# ----------------------------
 def _pick_best_from_srcset(srcset: str) -> str:
     if not srcset:
         return ""
-    parts = [p.strip() for p in srcset.split(",") if p.strip()]
     candidates = []
-    for p in parts:
+    for p in [p.strip() for p in srcset.split(",") if p.strip()]:
         toks = p.split()
         if not toks:
             continue
-        url = toks[0].strip()
         score = 0.0
         if len(toks) >= 2:
             s = toks[1].strip().lower()
             try:
-                if s.endswith("w"):
-                    score = float(s[:-1])
-                elif s.endswith("x"):
-                    score = float(s[:-1]) * 10000.0
+                score = float(s[:-1]) if s.endswith("w") else float(s[:-1]) * 10000.0 if s.endswith("x") else 0.0
             except Exception:
-                score = 0.0
-        candidates.append((score, url))
+                pass
+        candidates.append((score, toks[0].strip()))
     if not candidates:
         return ""
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1]
+    return sorted(candidates, reverse=True)[0][1]
 
 
 def _extract_bg_image_urls(style_text: str) -> List[str]:
     if not style_text:
         return []
-    urls = re.findall(r'url\(\s*["\']?([^"\')]+)["\']?\s*\)', style_text, flags=re.IGNORECASE)
-    return [u.strip() for u in urls if u.strip()]
+    return [u.strip() for u in re.findall(r'url\(\s*["\']?([^"\')]+)["\']?\s*\)', style_text, re.IGNORECASE) if u.strip()]
 
 
 def extract_image_candidates(html: str, base_url: str) -> List[Dict[str, Any]]:
@@ -490,33 +525,22 @@ def extract_image_candidates(html: str, base_url: str) -> List[Dict[str, Any]]:
             if cap:
                 texts.append(cap.get_text(" ", strip=True))
             texts.append(fig.get_text(" ", strip=True))
-
-        parent = img_tag.parent
-        if parent:
-            texts.append(parent.get_text(" ", strip=True))
-
-        prev = img_tag.find_previous(["p", "h1", "h2", "h3", "h4", "li"])
-        nxt = img_tag.find_next(["p", "h1", "h2", "h3", "h4", "li"])
-        if prev:
-            texts.append(prev.get_text(" ", strip=True))
-        if nxt:
-            texts.append(nxt.get_text(" ", strip=True))
-
-        merged = normalize_text("\n".join([t for t in texts if t]))
-        return merged[:1200]
+        if img_tag.parent:
+            texts.append(img_tag.parent.get_text(" ", strip=True))
+        for fn in [img_tag.find_previous, img_tag.find_next]:
+            el = fn(["p", "h1", "h2", "h3", "h4", "li"])
+            if el:
+                texts.append(el.get_text(" ", strip=True))
+        return normalize_text("\n".join(t for t in texts if t))[:1200]
 
     def push(u: Optional[str], meta: Dict[str, Any]):
         if not u:
             return
-        u = (u or "").strip()
-        if not u:
-            return
+        u = u.strip()
         full = urljoin(base_url, u)
         if not (full.startswith("http") or full.startswith("data:")):
             return
-        m = dict(meta or {})
-        m["img_url"] = full
-        items.append(m)
+        items.append({**meta, "img_url": full})
 
     og = soup.find("meta", property="og:image")
     tw = soup.find("meta", attrs={"name": "twitter:image"})
@@ -524,55 +548,41 @@ def extract_image_candidates(html: str, base_url: str) -> List[Dict[str, Any]]:
     push(tw.get("content") if tw else None, {"alt": "twitter:image", "title": "", "nearby_text": ""})
 
     container = soup.find("article") or soup.find("main") or soup.body or soup
-
     for img in container.find_all("img"):
         alt = (img.get("alt") or "").strip()
         title = (img.get("title") or "").strip()
-        nearby_text = get_nearby_text(img)
-
-        srcset = img.get("srcset") or img.get("data-srcset") or ""
-        best = _pick_best_from_srcset(srcset)
-        push(best, {"alt": alt, "title": title, "nearby_text": nearby_text})
-
+        nearby = get_nearby_text(img)
+        push(_pick_best_from_srcset(img.get("srcset") or img.get("data-srcset") or ""), {"alt": alt, "title": title, "nearby_text": nearby})
         for key in ["src", "data-src", "data-lazy-src", "data-original", "data-url", "data-img-url"]:
-            push(img.get(key), {"alt": alt, "title": title, "nearby_text": nearby_text})
+            push(img.get(key), {"alt": alt, "title": title, "nearby_text": nearby})
 
     for pic in container.find_all("picture"):
-        sources = pic.find_all("source")
-        for s in sources:
-            srcset = s.get("srcset") or s.get("data-srcset") or ""
-            best = _pick_best_from_srcset(srcset)
-            push(best, {"alt": "picture", "title": "", "nearby_text": ""})
+        for s in pic.find_all("source"):
+            push(_pick_best_from_srcset(s.get("srcset") or s.get("data-srcset") or ""), {"alt": "picture", "title": "", "nearby_text": ""})
         im = pic.find("img")
         if im:
-            srcset = im.get("srcset") or im.get("data-srcset") or ""
-            best = _pick_best_from_srcset(srcset)
-            push(best, {"alt": (im.get("alt") or "").strip(), "title": "", "nearby_text": get_nearby_text(im)})
+            alt = (im.get("alt") or "").strip()
+            nearby = get_nearby_text(im)
+            push(_pick_best_from_srcset(im.get("srcset") or im.get("data-srcset") or ""), {"alt": alt, "title": "", "nearby_text": nearby})
             for key in ["src", "data-src", "data-lazy-src", "data-original"]:
-                push(im.get(key), {"alt": (im.get("alt") or "").strip(), "title": "", "nearby_text": get_nearby_text(im)})
+                push(im.get(key), {"alt": alt, "title": "", "nearby_text": nearby})
 
     for tag in container.find_all(style=True):
-        style_text = tag.get("style") or ""
-        for u in _extract_bg_image_urls(style_text):
+        for u in _extract_bg_image_urls(tag.get("style") or ""):
             push(u, {"alt": "background-image", "title": "", "nearby_text": ""})
 
     uniq, seen = [], set()
     for it in items:
         u = it.get("img_url")
-        if not u or u in seen:
-            continue
-        seen.add(u)
-        uniq.append(it)
+        if u and u not in seen:
+            seen.add(u)
+            uniq.append(it)
     return uniq
 
 
 def is_good_image_url(url: str) -> bool:
     ul = (url or "").lower().strip()
-    if not ul:
-        return False
-    if any(k in ul for k in IGNORE_IMAGE_KEYWORDS):
-        return False
-    return True
+    return bool(ul) and not any(k in ul for k in IGNORE_IMAGE_KEYWORDS)
 
 
 def download_images(
@@ -585,7 +595,6 @@ def download_images(
     safe_mkdir(save_folder)
     saved: List[Dict[str, Any]] = []
     seen_sha1 = set()
-
     base_headers = {
         "User-Agent": USER_AGENT,
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
@@ -598,51 +607,32 @@ def download_images(
     for it in image_items:
         if max_images is not None and len(saved) >= max_images:
             break
-
         u = (it.get("img_url") or "").strip()
         if not u or not is_good_image_url(u):
             continue
-
         try:
-            data = b""
-            ct = ""
-            w = 0
-            h = 0
-            ext = "jpg"
-
+            data, ct, w, h, ext = b"", "", 0, 0, "jpg"
             if u.startswith("data:"):
-                m = re.match(r"data:([^;]+);base64,(.+)$", u, flags=re.IGNORECASE | re.DOTALL)
+                m = re.match(r"data:([^;]+);base64,(.+)$", u, re.IGNORECASE | re.DOTALL)
                 if not m:
                     continue
-                ct = (m.group(1) or "").lower().strip()
-                b64 = m.group(2) or ""
-                data = base64.b64decode(b64)
-                if not data:
-                    continue
+                ct = m.group(1).lower().strip()
+                data = base64.b64decode(m.group(2))
             else:
                 r = session.get(u, headers=base_headers, timeout=30, allow_redirects=True)
                 if not r or r.status_code != 200:
                     continue
                 ct = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
                 data = r.content or b""
-                if not data:
-                    continue
-
+            if not data:
+                continue
             sha1 = _sha1_bytes(data)
             if sha1 in seen_sha1:
                 continue
-
-            if "svg" in ct or u.lower().endswith(".svg"):
-                ext = "svg"
-            elif "png" in ct or u.lower().endswith(".png"):
-                ext = "png"
-            elif "webp" in ct or u.lower().endswith(".webp"):
-                ext = "webp"
-            elif "gif" in ct or u.lower().endswith(".gif"):
-                ext = "gif"
-            else:
-                ext = "jpg"
-
+            ext = "svg" if "svg" in ct or u.lower().endswith(".svg") else \
+                  "png" if "png" in ct or u.lower().endswith(".png") else \
+                  "webp" if "webp" in ct or u.lower().endswith(".webp") else \
+                  "gif" if "gif" in ct or u.lower().endswith(".gif") else "jpg"
             if ext != "svg":
                 try:
                     img = Image.open(io.BytesIO(data))
@@ -650,40 +640,30 @@ def download_images(
                     w, h = img.size
                 except Exception:
                     pass
-
             seen_sha1.add(sha1)
-
             outp = os.path.join(save_folder, f"img_{len(saved)+1}_{random.randint(100,999)}.{ext}")
             with open(outp, "wb") as f:
                 f.write(data)
-
             saved.append({
-                "saved_path": outp,
-                "sha1": sha1,
-                "source_url": u,
-                "content_type": ct,
-                "width": w,
-                "height": h,
+                "saved_path": outp, "sha1": sha1, "source_url": u,
+                "content_type": ct, "width": w, "height": h,
                 "alt_text": (it.get("alt") or "").strip(),
                 "title_text": (it.get("title") or "").strip(),
                 "nearby_text": (it.get("nearby_text") or "").strip(),
             })
-
         except Exception:
             continue
-
     return saved
 
 
 # ============================================================
-# Google Search (แบบ ww.py) — ใช้ page เดียวกัน
+# Google Search
 # ============================================================
 def _normalize_google_href(href: str) -> str:
     if not href:
         return ""
     if href.startswith("/url?"):
-        q = parse_qs(urlparse(href).query).get("q", [""])[0]
-        return unquote(q)
+        return unquote(parse_qs(urlparse(href).query).get("q", [""])[0])
     return href
 
 
@@ -701,7 +681,6 @@ def _wait_any(page, selectors: List[str], timeout_ms: int = 45_000) -> str:
 
 
 def _try_accept_google_consent(page) -> None:
-    # best-effort: บางเครื่องอาจมี consent / cookies
     try:
         for txt in ["I agree", "Accept all", "Agree", "ยอมรับทั้งหมด", "ยอมรับ", "ยืนยัน", "ตกลง"]:
             btn = page.locator(f"button:has-text('{txt}')")
@@ -714,14 +693,7 @@ def _try_accept_google_consent(page) -> None:
 
 
 def google_search_targets(job_id: str, page, keyword: str, max_links: int) -> List[Dict[str, str]]:
-    """
-    ทำเหมือน web_scraping_ww.py:
-    - เข้า google
-    - พิมพ์ keyword
-    - ดึง #search a:has(h3)
-    """
     log(job_id, "info", f"Google search targets: {keyword} (max_links={max_links})")
-
     page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=60_000)
     _try_accept_google_consent(page)
 
@@ -739,26 +711,16 @@ def google_search_targets(job_id: str, page, keyword: str, max_links: int) -> Li
     except Exception:
         pass
 
-    ok = _wait_any(
-        page,
-        selectors=[
-            "#search a:has(h3)",
-            "a:has(h3)",
-            'a[data-ved]:has(h3)',
-        ],
-        timeout_ms=45_000,
-    )
+    ok = _wait_any(page, ["#search a:has(h3)", "a:has(h3)", 'a[data-ved]:has(h3)'], timeout_ms=45_000)
     if not ok:
-        log(job_id, "warn", "Google results selector not found (layout changed / blocked).")
+        log(job_id, "warn", "Google results selector not found.")
         return []
 
     items: List[Dict[str, str]] = []
     seen = set()
 
     def push(u: str, t: str):
-        if not u.startswith("http"):
-            return
-        if "google.com" in urlparse(u).netloc:
+        if not u.startswith("http") or "google.com" in urlparse(u).netloc:
             return
         key = u.split("#")[0].strip()
         if not key or key in seen:
@@ -770,20 +732,13 @@ def google_search_targets(job_id: str, page, keyword: str, max_links: int) -> Li
     if anchors.count() == 0:
         anchors = page.locator("a:has(h3)")
 
-    take_n = max_links * 8
-    for i in range(min(anchors.count(), take_n)):
+    for i in range(min(anchors.count(), max_links * 8)):
         try:
             a = anchors.nth(i)
-            href = a.get_attribute("href") or ""
-            u = _normalize_google_href(href)
+            u = _normalize_google_href(a.get_attribute("href") or "")
             t = (a.locator("h3").first.inner_text() or "").strip()
-
-            if not u.startswith("http"):
-                continue
-            if "google.com" in urlparse(u).netloc:
-                continue
-
-            push(u, t)
+            if u.startswith("http") and "google.com" not in urlparse(u).netloc:
+                push(u, t)
             if len(items) >= max_links:
                 break
         except Exception:
@@ -794,7 +749,8 @@ def google_search_targets(job_id: str, page, keyword: str, max_links: int) -> Li
 
 
 # ============================================================
-# Scrape one URL (แบบ ww.py: เน้น visible text)
+# Scrape one URL — บันทึกแค่ content.txt
+# semantic chunking ทำใน RAG ingestion
 # ============================================================
 def scrape_single_url(
     job_id: str,
@@ -803,7 +759,7 @@ def scrape_single_url(
     pw_page,
     pw_context,
     max_images: Optional[int] = None,
-    max_files: int = 30
+    max_files: int = 30,
 ) -> Dict[str, Any]:
     safe_mkdir(folder)
     images_dir = os.path.join(folder, "images")
@@ -811,24 +767,17 @@ def scrape_single_url(
     safe_mkdir(images_dir)
     safe_mkdir(files_dir)
 
-    html = ""
-    final_url = url
-    title = ""
-    downloaded_files = 0
+    html, final_url, title, downloaded_files = "", url, "", 0
 
-    # 1) Playwright (reuse)
     try:
         log(job_id, "info", f"Scraping (Playwright reuse): {url}")
         _goto_safely(pw_page, url, timeout_ms=90_000)
 
-        # captcha solve (best-effort)
         try:
-            has_captcha = pw_page.locator('iframe[title="reCAPTCHA"]').count() > 0
-            if has_captcha:
+            if pw_page.locator('iframe[title="reCAPTCHA"]').count() > 0:
                 log(job_id, "warn", "Captcha detected! Attempting solve...")
                 solver = RecaptchaSolver(pw_page)
-                solved = solver.solveCaptcha(max_retries=3)
-                if solved:
+                if solver.solveCaptcha(max_retries=3):
                     try:
                         pw_page.wait_for_load_state("networkidle", timeout=10_000)
                     except PWTimeoutError:
@@ -841,51 +790,34 @@ def scrape_single_url(
 
         final_url = pw_page.url
         title = pw_page.title() or ""
-
         try:
             html = pw_page.content() or ""
         except Exception:
             html = ""
 
-        # ✅ KEY: ดึง “main visible text” ก่อน ไม่อ่าน body ตรง ๆ
-        raw_visible = ""
-        sel_used = "none"
+        raw_visible, sel_used = "", "none"
         try:
-            main_selectors = [
-                # โอกาสเจอเนื้อหาหลักสูง
-                "article",
-                "main",
-                "[role='main']",
-                "article [itemprop='articleBody']",
-                ".entry-content",
-                ".post-content",
-                ".article-content",
-                ".content",
-            ]
-            for sel in main_selectors:
+            for sel in ["article", "main", "[role='main']", "article [itemprop='articleBody']",
+                        ".entry-content", ".post-content", ".article-content", ".content"]:
                 loc = pw_page.locator(sel)
                 if loc.count() > 0:
                     raw_visible = loc.first.inner_text(timeout=4000) or ""
                     sel_used = sel
                     break
         except Exception:
-            raw_visible = ""
             sel_used = "selector_error"
 
-        # fallback -> body
-        if not (raw_visible or "").strip():
+        if not raw_visible.strip():
             try:
                 raw_visible = pw_page.inner_text("body") or ""
                 sel_used = "body"
             except Exception:
-                raw_visible = ""
                 sel_used = "body_error"
 
         visible_text = _normalize_visible_text(raw_visible, min_line_len=10)
 
-        # ถ้าหน้าเหมือนโดนบล็อก/consent -> reload 1 ครั้ง แล้วลองดึงใหม่
         if is_probably_blocked(visible_text):
-            log(job_id, "warn", f"Page looks blocked/consent. Reload once... (sel={sel_used})")
+            log(job_id, "warn", f"Page looks blocked. Reload once... (sel={sel_used})")
             try:
                 pw_page.reload(wait_until="domcontentloaded", timeout=45_000)
                 try:
@@ -893,157 +825,132 @@ def scrape_single_url(
                 except PWTimeoutError:
                     pass
                 pw_page.wait_for_timeout(1200)
-
-                # refresh html หลัง reload
                 try:
                     html = pw_page.content() or html
                 except Exception:
                     pass
-
-                # ลอง main selectors ใหม่
-                raw_visible2 = ""
-                sel_used2 = "none"
+                raw2, sel2 = "", "none"
                 try:
                     for sel in ["article", "main", "[role='main']"]:
                         loc = pw_page.locator(sel)
                         if loc.count() > 0:
-                            raw_visible2 = loc.first.inner_text(timeout=4000) or ""
-                            sel_used2 = sel
+                            raw2 = loc.first.inner_text(timeout=4000) or ""
+                            sel2 = sel
                             break
                 except Exception:
-                    raw_visible2 = ""
-                    sel_used2 = "selector_error"
-
-                if (raw_visible2 or "").strip():
-                    visible_text = _normalize_visible_text(raw_visible2, min_line_len=10)
-                    sel_used = sel_used2
+                    sel2 = "selector_error"
+                if raw2.strip():
+                    visible_text = _normalize_visible_text(raw2, min_line_len=10)
+                    sel_used = sel2
                 else:
-                    # fallback -> body หลัง reload
                     try:
-                        raw_visible = pw_page.inner_text("body") or ""
-                        visible_text = _normalize_visible_text(raw_visible, min_line_len=10)
+                        visible_text = _normalize_visible_text(pw_page.inner_text("body") or "", min_line_len=10)
                         sel_used = "body_after_reload"
                     except Exception:
                         pass
-
             except Exception:
                 pass
 
     except Exception as e:
         log(job_id, "warn", f"Playwright reuse failed: {e}")
-
-        # fallback requests
         try:
             r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
             if r.status_code == 200 and r.text.strip():
-                final_url = r.url
-                html = r.text
+                final_url, html = r.url, r.text
         except Exception as ee:
             log(job_id, "error", f"requests fallback failed: {ee}")
-
         visible_text = content_text_from_html(html)
 
     if not title:
         title = extract_page_title(html)
 
-    # ✅ เลือก text: เอาที่ “สะอาดสุด” ก่อน
-    # ต้องมีฟังก์ชัน content_main_text_from_html(html) ตามที่ผมให้ไปก่อนหน้า
-    main_html_text = ""
-    try:
-        # ถ้ายังไม่ได้เพิ่มฟังก์ชันนี้ ให้เพิ่มก่อน (content_main_text_from_html)
-        main_html_text = content_main_text_from_html(html)
-    except Exception:
-        main_html_text = ""
-
+    # เลือก text ที่ดีที่สุดจาก 3 candidates
     candidates = [
-        ("main_html", main_html_text),
+        ("main_html", content_main_text_from_html(html)),
         ("visible", visible_text),
         ("html_basic", content_text_from_html(html)),
     ]
-
-    best_name, best_text, best_len = "", "", 0
+    best_name, text, best_len = "", "", 0
     for name, txt in candidates:
-        L = len((txt or "").strip())
-        if L > best_len:
-            best_len = L
-            best_text = txt or ""
+        if len((txt or "").strip()) > best_len:
+            best_len = len(txt.strip())
+            text = txt.strip()
             best_name = name
 
-    text = (best_text or "").strip()
-    if len(text) < 250 and (visible_text or "").strip():
-        text = (visible_text or "").strip()
+    if len(text) < 250 and visible_text.strip():
+        text = visible_text.strip()
         best_name = "visible_fallback"
 
-    # ตัด boilerplate lines เพิ่มอีกชั้น (ถ้ามีฟังก์ชัน _drop_boilerplate_lines)
-    try:
-        text2 = _drop_boilerplate_lines(text)
-        if len(text2) >= 200:
-            text = text2
-    except Exception:
-        pass
+    text2 = _drop_boilerplate_lines(text)
+    if len(text2) >= 200:
+        text = text2
 
-    log(job_id, "info", f"Selected content source: {best_name}", {"len": len(text), "sel_used": locals().get("sel_used", "")})
+    log(job_id, "info", f"Selected content source: {best_name}", {"len": len(text)})
 
+    # ✅ บันทึกเฉพาะ content.txt — semantic chunking ทำตอน ingest
     content_path = os.path.join(folder, "content.txt")
     with open(content_path, "w", encoding="utf-8") as f:
         f.write(text or "")
 
     # Download files
     try:
-        file_links = extract_file_links(html, final_url)
-        downloaded_files = download_files_via_requests(
-            file_links, files_dir, base_url=final_url, max_files=max_files
-        )
+        pdf_links = [u for u in extract_file_links(html, final_url) if ".pdf" in (u or "").lower()]
+        downloaded_files = download_files_via_requests(pdf_links, files_dir, base_url=final_url, max_files=1)
     except Exception:
         downloaded_files = 0
+
+    # ✅ Extract text จาก PDF ที่ดาวน์โหลดมา บันทึกไว้ใน pdf_texts/
+    pdf_texts_dir = os.path.join(folder, "pdf_texts")
+    pdf_extract_results: List[Dict[str, Any]] = []
+    if downloaded_files > 0:
+        try:
+            pdf_extract_results = extract_pdfs_in_folder(
+                files_dir=files_dir,
+                pdf_texts_dir=pdf_texts_dir,
+                ocr_lang="th",
+            )
+            log(job_id, "info", f"PDF extraction: {len(pdf_extract_results)} files", {
+                "results": [{
+                    "pdf": r["pdf_path"],
+                    "chars": r["char_count"],
+                    "error": r["error"],
+                } for r in pdf_extract_results]
+            })
+        except Exception as e:
+            log(job_id, "warn", f"PDF extraction failed: {e}")
 
     # Download images
     images_download_meta_jsonl = os.path.join(images_dir, "images_download_meta.jsonl")
     sess = requests.Session()
     sess.headers.update({"User-Agent": USER_AGENT})
-
-    img_items = extract_image_candidates(html, final_url)
     saved_imgs = download_images(
         session=sess,
-        image_items=img_items,
+        image_items=extract_image_candidates(html, final_url),
         save_folder=images_dir,
         max_images=max_images,
         referer=final_url,
     )
-
     for it in saved_imgs:
         append_jsonl(images_download_meta_jsonl, {
             "type": "web_image_download",
             "page_url": final_url,
             "page_title": title,
-            "source_url": it.get("source_url", ""),
-            "saved_path": it.get("saved_path", ""),
-            "sha1": it.get("sha1", ""),
+            **{k: it.get(k, "") for k in ["source_url", "saved_path", "sha1", "alt_text", "title_text", "nearby_text"]},
             "width": it.get("width", 0),
             "height": it.get("height", 0),
-            "alt_text": it.get("alt_text", ""),
-            "title_text": it.get("title_text", ""),
-            "nearby_text": it.get("nearby_text", ""),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
 
     log(job_id, "info", f"Scrape finished: {final_url}", {
-        "title": title,
-        "content_len": len(text or ""),
-        "images": len(saved_imgs),
-        "files": downloaded_files,
+        "title": title, "content_len": len(text or ""),
+        "images": len(saved_imgs), "files": downloaded_files,
     })
 
     try:
-        meta_path = os.path.join(folder, "page_meta.json")
-        meta_obj = {
-            "source_url": final_url,
-            "title": title,
-            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        import json
-        with open(meta_path, "w", encoding="utf-8") as mf:
-            json.dump(meta_obj, mf, ensure_ascii=False, indent=2)
+        with open(os.path.join(folder, "page_meta.json"), "w", encoding="utf-8") as mf:
+            json.dump({"source_url": final_url, "title": title,
+                       "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S")},
+                      mf, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
@@ -1054,61 +961,44 @@ def scrape_single_url(
         "content_path": content_path,
         "images_dir": images_dir,
         "files_dir": files_dir,
+        "pdf_texts_dir": pdf_texts_dir,                      # ✅ เพิ่ม
+        "pdf_extracted": len(pdf_extract_results),           # ✅ เพิ่ม
         "images_download_meta_jsonl": images_download_meta_jsonl,
         "downloaded_images": len(saved_imgs),
         "downloaded_files": downloaded_files,
     }
 
 
-
 # ============================================================
-# Main entry: run_external_scrape (Google-first เหมือน ww.py)
+# Main entry
 # ============================================================
 def run_external_scrape(job_id: str, keyword: str, max_links: int = 5) -> Dict[str, Any]:
-    """
-    ✅ เปิด session ครั้งเดียว:
-    - Google search ด้วย page เดิม
-    - วน scrape ทุก URL ด้วย page เดิม
-    """
     ts = time.strftime("%Y%m%d_%H%M%S")
     safe_kw = re.sub(r"[^a-zA-Z0-9ก-๙_]+", "_", keyword)[:40]
     main_folder = os.path.join(settings.OUTPUT_BASE_DIR, f"data_{safe_kw}_{ts}")
     safe_mkdir(main_folder)
-
     collected: List[Dict[str, Any]] = []
 
     pw = PlaywrightSession(job_id).start()
     try:
         targets = google_search_targets(job_id, pw.page, keyword, max_links=max_links)
-        urls = [t["url"] for t in targets]
-
-        log(job_id, "info", f"Search URLs => {len(urls)}", {"urls": urls})
+        log(job_id, "info", f"Search URLs => {len(targets)}", {"urls": [t['url'] for t in targets]})
 
         for idx, t in enumerate(targets, start=1):
             u = t.get("url", "")
-            host = urlparse(u).netloc
-            site_folder = os.path.join(main_folder, f"{idx:02d}_{safe_filename(host, 40)}")
+            site_folder = os.path.join(main_folder, f"{idx:02d}_{safe_filename(urlparse(u).netloc, 40)}")
             safe_mkdir(site_folder)
-
             try:
                 res = scrape_single_url(
-                    job_id=job_id,
-                    url=u,
-                    folder=site_folder,
-                    pw_page=pw.page,
-                    pw_context=pw.context,
-                    max_images=None,
-                    max_files=30,
+                    job_id=job_id, url=u, folder=site_folder,
+                    pw_page=pw.page, pw_context=pw.context,
+                    max_images=None, max_files=30,
                 )
-                res["Source"] = "google"
-                res["rank"] = idx
-                res["search_title"] = t.get("title", "")
+                res.update({"Source": "google", "rank": idx, "search_title": t.get("title", "")})
                 collected.append(res)
             except Exception as e:
                 log(job_id, "error", f"Failed to scrape {u}: {e}", {"traceback": traceback.format_exc()})
-
             time.sleep(0.8 + random.uniform(0.2, 0.6))
-
     finally:
         pw.close()
 

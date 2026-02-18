@@ -1,9 +1,11 @@
 # backend/rag/rag_store.py
 from __future__ import annotations
 
+import re
 import hashlib
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -22,6 +24,9 @@ def sha1_text(s: str) -> str:
     return hashlib.sha1((s or "").encode("utf-8", errors="ignore")).hexdigest()
 
 
+# ============================================================
+# Embedder
+# ============================================================
 class OllamaEmbedder:
     def __init__(self, host: str, model: str, timeout_s: int = 60, max_concurrency: int = 4):
         self.host = host.rstrip("/")
@@ -31,8 +36,7 @@ class OllamaEmbedder:
 
     async def embed_one(self, text: str) -> List[float]:
         payload = {"model": self.model, "prompt": text}
-        timeout = httpx.Timeout(self.timeout_s)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_s)) as client:
             r = await client.post(f"{self.host}/api/embeddings", json=payload)
         if r.status_code != 200:
             raise RuntimeError(f"Ollama embeddings failed: {r.status_code} {r.text[:200]}")
@@ -52,11 +56,14 @@ class OllamaEmbedder:
         return await asyncio.gather(*[_one(t) for t in texts])
 
 
+# ============================================================
+# DB Models
+# ============================================================
 class RAGChunk(Base):
     __tablename__ = "rag_chunks"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    namespace: Mapped[str] = mapped_column(String(32), index=True)     # external / internal
+    namespace: Mapped[str] = mapped_column(String(32), index=True)
     source_type: Mapped[str] = mapped_column(String(64), index=True)
     source_url: Mapped[str] = mapped_column(Text, default="")
     source_path: Mapped[str] = mapped_column(Text, default="")
@@ -64,8 +71,6 @@ class RAGChunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, default=1)
     chunk_total: Mapped[int] = mapped_column(Integer, default=1)
     text: Mapped[str] = mapped_column(Text)
-
-    # ✅ dim ตาม settings (ถ้าเปลี่ยน dim ต้อง reset/migrate DB)
     embedding: Mapped[Any] = mapped_column(Vector(int(settings.EMBED_DIMS)))
     score_hint: Mapped[float] = mapped_column(Float, default=0.0)
 
@@ -77,7 +82,7 @@ class RAGFact(Base):
     __tablename__ = "rag_facts"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    namespace: Mapped[str] = mapped_column(String(32), index=True)     # external / internal
+    namespace: Mapped[str] = mapped_column(String(32), index=True)
     entity: Mapped[str] = mapped_column(String(256), index=True)
     key: Mapped[str] = mapped_column(String(128), index=True)
     value: Mapped[str] = mapped_column(String(512))
@@ -99,6 +104,9 @@ class RetrievedChunk:
     meta: Dict[str, Any]
 
 
+# ============================================================
+# RAGStore
+# ============================================================
 class RAGStore:
     def __init__(self, database_url: str, ollama_host: str, embed_model: str, embed_dims: int = 768):
         self.database_url = database_url
@@ -117,15 +125,117 @@ class RAGStore:
             await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
 
+    # ============================================================
+    # ✅ Semantic Chunking
+    # ============================================================
+    @staticmethod
+    def _cosine_similarity(a: List[float], b: List[float]) -> float:
+        """คำนวณ cosine similarity ระหว่าง 2 vectors"""
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = sum(x ** 2 for x in a) ** 0.5
+        norm_b = sum(x ** 2 for x in b) ** 0.5
+        return dot / (norm_a * norm_b + 1e-9)
+
+    @staticmethod
+    def _split_sentences(text: str) -> List[str]:
+        """
+        แบ่งประโยคสำหรับภาษาไทยและอังกฤษ
+        ใช้ newline และ punctuation เป็น boundary
+        """
+        # normalize newlines ก่อน
+        text = re.sub(r"\r\n|\r", "\n", text)
+
+        # แบ่งที่ newline หรือหลัง . ! ? ที่ตามด้วย space/newline
+        parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+
+        sentences = [p.strip() for p in parts if p.strip()]
+        return sentences
+
+    async def semantic_chunk(
+        self,
+        text: str,
+        similarity_threshold: float = 0.85,
+        min_chunk_chars: int = 100,
+    ) -> List[str]:
+        """
+        แบ่ง text เป็น chunks ตามความหมาย
+
+        วิธีการ:
+        1. แบ่งเป็นประโยคก่อน
+        2. embed ทุกประโยคพร้อมกัน
+        3. เปรียบ cosine similarity ระหว่างประโยคติดกัน
+        4. ถ้า similarity < threshold = เปลี่ยนเรื่อง → ตัด chunk ตรงนั้น
+
+        Args:
+            text: เนื้อหาทั้งหมด
+            similarity_threshold: ค่า similarity ต่ำกว่านี้ = เปลี่ยนเรื่อง (0.0-1.0)
+                                  - ค่าสูง (0.90+) = ตัดถี่ ได้ chunk เล็กลง
+                                  - ค่าต่ำ (0.75-) = ตัดห่าง ได้ chunk ใหญ่ขึ้น
+            min_chunk_chars: chunk ที่สั้นกว่านี้จะถูก merge กับ chunk ก่อนหน้า
+
+        Returns:
+            List[str]: chunks ที่แบ่งตามความหมาย
+        """
+        if not text or not text.strip():
+            return []
+
+        sentences = self._split_sentences(text)
+
+        # ถ้ามีแค่ประโยคเดียว ไม่ต้อง embed
+        if len(sentences) <= 1:
+            return [s for s in sentences if len(s) >= min_chunk_chars]
+
+        # embed ทุกประโยคพร้อมกัน (ใช้ embed_many เพื่อ concurrency)
+        embeddings = await self.embedder.embed_many(sentences)
+
+        # วน compare similarity ระหว่างประโยคติดกัน
+        chunks: List[str] = []
+        current_sentences: List[str] = [sentences[0]]
+
+        for i in range(1, len(sentences)):
+            sim = self._cosine_similarity(embeddings[i - 1], embeddings[i])
+
+            if sim < similarity_threshold:
+                # similarity ต่ำ = เปลี่ยนเรื่อง → ปิด chunk เก่า
+                chunk_text = " ".join(current_sentences).strip()
+                if chunk_text:
+                    chunks.append(chunk_text)
+                # เริ่ม chunk ใหม่
+                current_sentences = [sentences[i]]
+            else:
+                # ยังเรื่องเดียวกัน → สะสมใน chunk ปัจจุบัน
+                current_sentences.append(sentences[i])
+
+        # chunk สุดท้าย
+        if current_sentences:
+            chunk_text = " ".join(current_sentences).strip()
+            if chunk_text:
+                chunks.append(chunk_text)
+
+        # merge chunk ที่สั้นเกินไปเข้ากับ chunk ก่อนหน้า
+        merged: List[str] = []
+        for chunk in chunks:
+            if merged and len(chunk) < min_chunk_chars:
+                merged[-1] = merged[-1] + " " + chunk
+            else:
+                merged.append(chunk)
+
+        return [c for c in merged if c.strip()]
+
+    # ============================================================
+    # Upsert
+    # ============================================================
     async def upsert_chunks(self, namespace: str, chunks: List[str], metas: List[Dict[str, Any]]) -> int:
         if not chunks:
             return 0
 
         embs = await self.embedder.embed_many(chunks)
-
         rows = []
         for t, m, e in zip(chunks, metas, embs):
-            source_key = f"{namespace}|{m.get('source_type','')}|{m.get('source_url','')}|{m.get('source_path','')}|{m.get('page','')}|{m.get('chunk_index','')}"
+            source_key = (
+                f"{namespace}|{m.get('source_type','')}|{m.get('source_url','')}|"
+                f"{m.get('source_path','')}|{m.get('page','')}|{m.get('chunk_index','')}"
+            )
             rid = sha1_text(source_key + "|" + t)
             rows.append({
                 "id": rid,
@@ -153,7 +263,11 @@ class RAGStore:
             return 0
         rows = []
         for f in facts:
-            key = f"{namespace}|{f.get('entity','')}|{f.get('key','')}|{f.get('value','')}|{f.get('year',0)}|{meta.get('source_path','')}|{meta.get('page',0)}"
+            key = (
+                f"{namespace}|{f.get('entity','')}|{f.get('key','')}|"
+                f"{f.get('value','')}|{f.get('year',0)}|"
+                f"{meta.get('source_path','')}|{meta.get('page',0)}"
+            )
             rid = sha1_text(key)
             rows.append({
                 "id": rid,
@@ -176,16 +290,176 @@ class RAGStore:
             await db.commit()
         return len(rows)
 
-    async def query_semantic(self, namespace: str, question: str, top_k: int = 8) -> List[RetrievedChunk]:
-        q_emb = await self.embedder.embed_one(question)
+    # ============================================================
+    # ✅ Ingest จาก content.txt ด้วย Semantic Chunking
+    # ============================================================
+    async def ingest_from_content_txt(
+        self,
+        namespace: str,
+        content_path: str,
+        source_url: str = "",
+        source_type: str = "web_scrape",
+        similarity_threshold: float = 0.85,
+        min_chunk_chars: int = 100,
+    ) -> Dict[str, Any]:
+        """
+        อ่าน content.txt → semantic_chunk() → upsert เข้า DB
 
+        Args:
+            namespace: ชื่อ namespace ใน DB
+            content_path: path ของ content.txt
+            source_url: URL ต้นทาง
+            source_type: ประเภทของ source
+            similarity_threshold: ค่า threshold สำหรับ semantic chunking
+            min_chunk_chars: ความยาวขั้นต่ำของแต่ละ chunk
+
+        Returns:
+            dict: { "count": int, "chunks_preview": List[str] }
+        """
+        path = Path(content_path)
+        if not path.exists():
+            raise FileNotFoundError(f"content.txt not found: {content_path}")
+
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return {"count": 0, "chunks_preview": []}
+
+        # ✅ Semantic chunking
+        chunks = await self.semantic_chunk(
+            text=text,
+            similarity_threshold=similarity_threshold,
+            min_chunk_chars=min_chunk_chars,
+        )
+
+        if not chunks:
+            return {"count": 0, "chunks_preview": []}
+
+        metas = [
+            {
+                "source_type": source_type,
+                "source_url": source_url,
+                "source_path": str(path),
+                "page": 0,
+                "chunk_index": idx + 1,
+                "chunk_total": len(chunks),
+            }
+            for idx in range(len(chunks))
+        ]
+
+        count = await self.upsert_chunks(namespace, chunks, metas)
+
+        return {
+            "count": count,
+            # preview 100 chars แรกของแต่ละ chunk เพื่อ debug
+            "chunks_preview": [c[:100] + "..." if len(c) > 100 else c for c in chunks],
+        }
+
+    async def ingest_auto(
+        self,
+        namespace: str,
+        folder: str,
+        source_url: str = "",
+        source_type: str = "web_scrape",
+        similarity_threshold: float = 0.85,
+        min_chunk_chars: int = 100,
+    ) -> Dict[str, Any]:
+        """
+        ✅ Smart ingest: อ่านทั้ง content.txt และ pdf_texts/*.txt แล้ว semantic chunk
+
+        Args:
+            namespace: ชื่อ namespace ใน DB
+            folder: path ของ folder ที่ scraper สร้าง
+            source_url: URL ต้นทาง
+            source_type: ประเภทของ source
+            similarity_threshold: ค่า threshold สำหรับ semantic chunking
+            min_chunk_chars: ความยาวขั้นต่ำของแต่ละ chunk
+
+        Returns:
+            dict: {
+                "total_count": int,          — chunk ทั้งหมดที่ upsert
+                "content_count": int,        — chunk จาก content.txt
+                "pdf_count": int,            — chunk จาก PDF ทั้งหมด
+                "pdf_files": List[str],      — รายชื่อ PDF ที่ ingest
+            }
+        """
+        folder_path = Path(folder)
+        total_count = 0
+        content_count = 0
+        pdf_count = 0
+        pdf_files_ingested: List[str] = []
+
+        # ── 1) content.txt (เนื้อหาจากเว็บ) ─────────────────────────
+        content_txt = folder_path / "content.txt"
+        if content_txt.exists() and content_txt.stat().st_size > 0:
+            result = await self.ingest_from_content_txt(
+                namespace=namespace,
+                content_path=str(content_txt),
+                source_url=source_url,
+                source_type=source_type,
+                similarity_threshold=similarity_threshold,
+                min_chunk_chars=min_chunk_chars,
+            )
+            content_count = result["count"]
+            total_count += content_count
+
+        # ── 2) pdf_texts/*.txt (text ที่ extract จาก PDF) ────────────
+        pdf_texts_dir = folder_path / "pdf_texts"
+        if pdf_texts_dir.exists():
+            txt_files = sorted(pdf_texts_dir.glob("*.txt"))
+
+            for txt_file in txt_files:
+                if txt_file.stat().st_size == 0:
+                    continue
+                try:
+                    result = await self.ingest_from_content_txt(
+                        namespace=namespace,
+                        content_path=str(txt_file),
+                        source_url=source_url,
+                        # ✅ บอกว่ามาจาก PDF เพื่อแยก metadata ได้ชัดเจน
+                        source_type="pdf",
+                        similarity_threshold=similarity_threshold,
+                        min_chunk_chars=min_chunk_chars,
+                    )
+                    pdf_count += result["count"]
+                    total_count += result["count"]
+                    pdf_files_ingested.append(txt_file.name)
+                except Exception as e:
+                    print(f"[ingest_auto] skip {txt_file.name}: {e}")
+
+        return {
+            "total_count": total_count,
+            "content_count": content_count,
+            "pdf_count": pdf_count,
+            "pdf_files": pdf_files_ingested,
+        }
+
+    # ============================================================
+    # Query
+    # ============================================================
+    async def query_semantic(
+        self,
+        namespace: str,
+        question: str,
+        top_k: int = 15,
+        min_score: float = 0.01,
+    ) -> List[RetrievedChunk]:
+        """
+        ค้นหา chunks ที่ใกล้เคียงกับ question มากที่สุด
+
+        Args:
+            namespace: ชื่อ namespace ใน DB
+            question: คำถามที่ต้องการค้นหา
+            top_k: จำนวน chunks สูงสุดที่จะ return (default 15)
+            min_score: ตัด chunk ที่ score ต่ำกว่านี้ทิ้ง
+        """
+        q_emb = await self.embedder.embed_one(question)
         dist_expr = RAGChunk.embedding.l2_distance(q_emb)
 
         async with self.SessionLocal() as db:
             stmt = (
                 select(RAGChunk, dist_expr.label("dist"))
                 .where(RAGChunk.namespace == namespace)
-                .order_by(dist_expr)  # ✅ ชัวร์กว่า order_by("dist")
+                .order_by(dist_expr)
                 .limit(top_k)
             )
             res = await db.execute(stmt)
@@ -196,6 +470,10 @@ class RAGStore:
             ch: RAGChunk = row[0]
             dist = float(row[1]) if row[1] is not None else 999.0
             score = float(1.0 / (1.0 + dist))
+
+            if score < min_score:
+                continue
+
             out.append(RetrievedChunk(
                 text=ch.text or "",
                 score=score,
@@ -210,6 +488,9 @@ class RAGStore:
                     "score": score,
                 }
             ))
+
+        # ✅ เรียงตาม chunk_index เพื่อให้ลำดับตรงกับบทความต้นทาง
+        out.sort(key=lambda x: (x.meta.get("source_path", ""), x.meta.get("chunk_index", 0)))
         return out
 
     async def query_structured(self, namespace: str, key: str, limit: int = 30) -> List[Dict[str, Any]]:
@@ -217,21 +498,11 @@ class RAGStore:
             stmt = select(RAGFact).where(RAGFact.namespace == namespace, RAGFact.key == key).limit(limit)
             res = await db.execute(stmt)
             facts = [r[0] for r in res.all()]
-
-        out = []
-        for f in facts:
-            out.append({
-                "namespace": f.namespace,
-                "entity": f.entity,
-                "key": f.key,
-                "value": f.value,
-                "unit": f.unit,
-                "year": f.year,
-                "source_path": f.source_path,
-                "page": f.page,
-                "evidence_text": f.evidence_text,
-            })
-        return out
+        return [{
+            "namespace": f.namespace, "entity": f.entity, "key": f.key,
+            "value": f.value, "unit": f.unit, "year": f.year,
+            "source_path": f.source_path, "page": f.page, "evidence_text": f.evidence_text,
+        } for f in facts]
 
     async def preview_chunks(self, namespace: str, source_type: str = "", limit: int = 30) -> List[Dict[str, Any]]:
         async with self.SessionLocal() as db:
@@ -241,14 +512,9 @@ class RAGStore:
             stmt = stmt.order_by(RAGChunk.source_type, RAGChunk.source_path, RAGChunk.page).limit(limit)
             res = await db.execute(stmt)
             rows = [r[0] for r in res.all()]
-
         return [{
-            "id": c.id,
-            "namespace": c.namespace,
-            "source_type": c.source_type,
-            "source_path": c.source_path,
-            "page": c.page,
-            "chunk_index": c.chunk_index,
-            "chunk_total": c.chunk_total,
+            "id": c.id, "namespace": c.namespace, "source_type": c.source_type,
+            "source_path": c.source_path, "page": c.page,
+            "chunk_index": c.chunk_index, "chunk_total": c.chunk_total,
             "text_preview": (c.text or "")[:260],
         } for c in rows]
