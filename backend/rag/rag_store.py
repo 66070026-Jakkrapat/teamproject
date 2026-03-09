@@ -493,9 +493,12 @@ class RAGStore:
         out.sort(key=lambda x: (x.meta.get("source_path", ""), x.meta.get("chunk_index", 0)))
         return out
 
-    async def query_structured(self, namespace: str, key: str, limit: int = 30) -> List[Dict[str, Any]]:
+    async def query_structured(self, namespace: str, key: str, limit: int = 30, source_contains: str = "") -> List[Dict[str, Any]]:
         async with self.SessionLocal() as db:
-            stmt = select(RAGFact).where(RAGFact.namespace == namespace, RAGFact.key == key).limit(limit)
+            stmt = select(RAGFact).where(RAGFact.namespace == namespace, RAGFact.key == key)
+            if source_contains:
+                stmt = stmt.where(RAGFact.source_path.contains(source_contains))
+            stmt = stmt.order_by(RAGFact.year.asc(), RAGFact.entity.asc()).limit(limit)
             res = await db.execute(stmt)
             facts = [r[0] for r in res.all()]
         return [{
@@ -503,6 +506,44 @@ class RAGStore:
             "value": f.value, "unit": f.unit, "year": f.year,
             "source_path": f.source_path, "page": f.page, "evidence_text": f.evidence_text,
         } for f in facts]
+
+    async def get_source_chunks(
+        self,
+        namespace: str,
+        source_url: str = "",
+        source_path: str = "",
+        limit: int = 50,
+    ) -> List[RetrievedChunk]:
+        if not source_url and not source_path:
+            return []
+
+        async with self.SessionLocal() as db:
+            stmt = select(RAGChunk).where(RAGChunk.namespace == namespace)
+            if source_url:
+                stmt = stmt.where(RAGChunk.source_url == source_url)
+            if source_path:
+                stmt = stmt.where(RAGChunk.source_path == source_path)
+            stmt = stmt.order_by(RAGChunk.chunk_index).limit(limit)
+            res = await db.execute(stmt)
+            rows = [r[0] for r in res.all()]
+
+        return [
+            RetrievedChunk(
+                text=c.text or "",
+                score=float(c.score_hint or 0.0),
+                meta={
+                    "namespace": c.namespace,
+                    "source_type": c.source_type,
+                    "source_url": c.source_url,
+                    "source_path": c.source_path,
+                    "page": c.page,
+                    "chunk_index": c.chunk_index,
+                    "chunk_total": c.chunk_total,
+                    "score": float(c.score_hint or 0.0),
+                },
+            )
+            for c in rows
+        ]
 
     async def preview_chunks(self, namespace: str, source_type: str = "", limit: int = 30) -> List[Dict[str, Any]]:
         async with self.SessionLocal() as db:

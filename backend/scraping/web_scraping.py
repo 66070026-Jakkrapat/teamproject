@@ -423,6 +423,35 @@ def content_main_text_from_html(html: str) -> str:
     return _drop_boilerplate_lines(normalize_text(text)).strip()
 
 
+def extract_numbered_outline_from_html(html: str) -> List[Dict[str, Any]]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    _drop_junk_blocks(soup)
+    main = _pick_best_main_container(soup)
+    root = main or soup
+
+    outline: List[Dict[str, Any]] = []
+    seen = set()
+    for tag in root.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "strong"]):
+        text = normalize_text(tag.get_text(" ", strip=True))
+        if not text:
+            continue
+        m = re.match(r"^\s*(\d{1,2})\.\s*(.+?)\s*$", text)
+        if not m:
+            continue
+        order = int(m.group(1))
+        title = m.group(2).strip(" -:\t")
+        if not title or len(title) > 180:
+            continue
+        sig = (order, title.lower())
+        if sig in seen:
+            continue
+        seen.add(sig)
+        outline.append({"order": order, "title": title})
+
+    outline.sort(key=lambda item: item["order"])
+    return outline
+
+
 # ----------------------------
 # Files & Images
 # ----------------------------
@@ -891,6 +920,14 @@ def scrape_single_url(
     content_path = os.path.join(folder, "content.txt")
     with open(content_path, "w", encoding="utf-8") as f:
         f.write(text or "")
+
+    try:
+        outline = extract_numbered_outline_from_html(html)
+        if outline:
+            with open(os.path.join(folder, "outline.json"), "w", encoding="utf-8") as f:
+                json.dump(outline, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
     # Download files
     try:

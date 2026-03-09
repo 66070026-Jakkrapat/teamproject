@@ -19,7 +19,10 @@ Rules:
 1) Answer comprehensively based ONLY on context.
 2) If conflicting info exists, explicitly describe conflicts.
 3) Always add citations per paragraph in the format: [source: ...]
-4) Output in Thai.
+4) Ignore context blocks that do not directly help answer the question.
+5) Output in Thai.
+6) Do not add apologies, disclaimers, or commentary about irrelevant context. Just answer.
+7) Preserve exact years, percentages, and numbers from context. Do not rewrite or infer different numbers.
 
 Question:
 {question}

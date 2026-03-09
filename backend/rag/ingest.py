@@ -35,6 +35,18 @@ def _load_page_meta(site_folder: str) -> Dict[str, Any]:
     except Exception:
         return {}
 
+
+def _load_outline(site_folder: str) -> List[Dict[str, Any]]:
+    p = os.path.join(site_folder, "outline.json")
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, list) else []
+    except Exception:
+        return []
+
 def _looks_like_menu_line(line: str) -> bool:
     """
     Heuristic: เมนู/ฟุตเตอร์มักเป็นบรรทัดสั้นๆ, คำไม่เยอะ, ไม่มี ., ไม่มีเลขหัวข้อ, ไม่มีประโยค
@@ -81,7 +93,7 @@ def _clean_web_text_for_rag(text: str) -> str:
 
     return "\n".join(out).strip()
 
-_SECTION_SPLIT_RE = re.compile(r"(?m)^\s*(\d{1,2})\.\s+")
+_SECTION_SPLIT_RE = re.compile(r"(?m)^\s*(\d{1,2})\.\s*")
 def _split_by_numbered_sections(text: str) -> List[str]:
     """
     แยกเอกสารที่มีหัวข้อ 1. 2. 3. ... ให้หัวข้ออยู่เป็นก้อน ๆ
@@ -112,6 +124,72 @@ def _split_by_numbered_sections(text: str) -> List[str]:
         i += 2
 
     return [p.strip() for p in parts if p.strip()]
+
+
+_NUMBERED_SECTION_TITLE_RE = re.compile(r"^\s*(\d{1,2})\.\s*(.+?)\s*$")
+
+
+def _extract_numbered_section_facts(
+    sections: List[str],
+    page_title: str,
+    source_path: str,
+) -> List[Dict[str, Any]]:
+    facts: List[Dict[str, Any]] = []
+    entity = (page_title or os.path.basename(source_path or "") or "web_page").strip()
+
+    for sec in sections or []:
+        lines = [ln.strip() for ln in (sec or "").splitlines() if ln.strip()]
+        if not lines:
+            continue
+
+        first = lines[0]
+        m = _NUMBERED_SECTION_TITLE_RE.match(first)
+        if not m:
+            continue
+
+        order = int(m.group(1))
+        title = m.group(2).strip(" -:\t")
+        if not title or len(title) > 180:
+            continue
+
+        facts.append({
+            "entity": entity,
+            "key": "numbered_section_title",
+            "value": title,
+            "unit": "",
+            "year": order,
+            "evidence_text": sec[:1000],
+        })
+
+    return _dedupe_facts(facts)
+
+
+def _extract_outline_facts(
+    outline: List[Dict[str, Any]],
+    page_title: str,
+    source_path: str,
+) -> List[Dict[str, Any]]:
+    facts: List[Dict[str, Any]] = []
+    entity = (page_title or os.path.basename(source_path or "") or "web_page").strip()
+
+    for item in outline or []:
+        try:
+            order = int(item.get("order") or 0)
+        except Exception:
+            order = 0
+        title = str(item.get("title") or "").strip(" -:\t")
+        if order <= 0 or not title or len(title) > 180:
+            continue
+        facts.append({
+            "entity": entity,
+            "key": "numbered_section_title",
+            "value": title,
+            "unit": "",
+            "year": order,
+            "evidence_text": title,
+        })
+
+    return _dedupe_facts(facts)
 
 def _split_by_chars(text: str, max_chars: int = EMBED_MAX_CHARS, overlap: int = EMBED_OVERLAP) -> List[str]:
     """
@@ -371,6 +449,7 @@ async def ingest_site_folder(store: RAGStore, namespace: str, site_folder: str) 
         page_meta = _load_page_meta(site_folder)
         source_url = (page_meta.get("source_url") or "").strip()
         page_title = (page_meta.get("title") or "").strip()
+        outline = _load_outline(site_folder)
 
         # ✅ 2) ล้างเมนู/ขยะก่อน
         cleaned = _clean_web_text_for_rag(raw)
@@ -398,6 +477,20 @@ async def ingest_site_folder(store: RAGStore, namespace: str, site_folder: str) 
                 )
                 total_chunks += r["chunks"]
                 total_facts += r["facts"]
+
+            numbered_facts = _extract_outline_facts(outline, page_title=page_title, source_path=content_path)
+            if not numbered_facts:
+                numbered_facts = _extract_numbered_section_facts(sections, page_title=page_title, source_path=content_path)
+            if numbered_facts:
+                total_facts += await store.upsert_facts(
+                    namespace,
+                    numbered_facts,
+                    {
+                        "source_type": "web_page",
+                        "source_path": content_path,
+                        "page": 0,
+                    },
+                )
         else:
             r = await ingest_text_blob(
                 store,
