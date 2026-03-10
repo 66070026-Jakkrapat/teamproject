@@ -514,8 +514,7 @@ def extract_numbered_item(section: str) -> tuple[int, str, str] | None:
             rest = rest[:idx].strip()
             break
 
-    short_desc = re.sub(r"\s+", " ", rest).strip()
-    short_desc = short_desc[:140].rstrip(" ,;")
+    short_desc = truncate_text_at_boundary(rest, 220)
     return order, title, short_desc
 
 
@@ -579,8 +578,7 @@ def parse_numbered_section(section: str) -> tuple[int, str, str] | None:
     if title and rest.startswith(title):
         rest = rest[len(title):].strip()
 
-    short_desc = re.sub(r"\s+", " ", rest).strip()
-    short_desc = short_desc[:160].rstrip(" ,;:")
+    short_desc = truncate_text_at_boundary(rest, 240)
     if not short_desc:
         short_desc = base[2]
     return order, title or base[1], short_desc
@@ -602,6 +600,28 @@ def load_source_text(source_path: str) -> str:
 def question_requests_definition_or_numeric_detail(question: str) -> bool:
     q = question or ""
     return any(token in q for token in ["คืออะไร", "หมายถึงอะไร", "บอกอะไรเกี่ยวกับ", "เท่าไร", "เท่าไหร่", "ตัวเลข", "ช่วงเวลา", "%", "ปี"])
+
+
+def truncate_text_at_boundary(text: str, max_chars: int) -> str:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    cutoff = max(
+        [
+            cleaned.rfind(marker, 0, max_chars)
+            for marker in [". ", "? ", "! ", "… ", " ดังนั้น", " โดย", " ซึ่ง", " และ", " รวมถึง"]
+        ],
+        default=-1,
+    )
+    if cutoff >= int(max_chars * 0.55):
+        return cleaned[:cutoff].rstrip(" ,;:")
+
+    space_cutoff = cleaned.rfind(" ", 0, max_chars)
+    if space_cutoff >= int(max_chars * 0.55):
+        return cleaned[:space_cutoff].rstrip(" ,;:")
+
+    return cleaned[:max_chars].rstrip(" ,;:")
 
 
 def clean_numbered_section_text(section: str) -> str:

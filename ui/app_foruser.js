@@ -56,6 +56,18 @@ function setNotice(lines = []) {
   node.dataset.visible = "true";
 }
 
+function setDocNotice(lines = []) {
+  const node = el("docNotice");
+  if (!node) return;
+  if (!lines.length) {
+    node.textContent = "";
+    node.dataset.visible = "false";
+    return;
+  }
+  node.textContent = lines.join("\n");
+  node.dataset.visible = "true";
+}
+
 function updateCharCount() {
   const size = el("q").value.trim().length;
   el("charCount").textContent = `${size} ตัวอักษร`;
@@ -79,6 +91,8 @@ function switchPage(page) {
   el("pageDesc").textContent = PAGE_META[current].desc;
   if (current === "chat") {
     scrollChatToBottom();
+  } else if (current === "visualizer") {
+    refreshChunkVisualizer();
   }
 }
 
@@ -194,6 +208,67 @@ async function refreshDashboardAndDocuments() {
   }
 }
 
+function renderVisualizer(chunks = []) {
+  const summary = el("visualizerSummary");
+  const chunkRoot = el("visualizerChunks");
+  const barsRoot = el("visualizerBars");
+  if (!summary || !chunkRoot || !barsRoot) return;
+
+  summary.textContent = chunks.length
+    ? `แสดง ${chunks.length} preview chunks ล่าสุดจากคลังความรู้`
+    : "ยังไม่มี chunks ในระบบ";
+
+  if (!chunks.length) {
+    chunkRoot.innerHTML = '<div class="empty">ยังไม่มี preview chunks</div>';
+    barsRoot.innerHTML = '<div class="empty">ยังไม่มีข้อมูล source coverage</div>';
+    return;
+  }
+
+  chunkRoot.innerHTML = chunks.map((chunk, index) => `
+    <article class="viz-item">
+      <h3 class="viz-item__title">Chunk ${index + 1} · ${escapeHtml(chunk.namespace || "-")}</h3>
+      <div class="viz-item__meta">
+        ${escapeHtml(chunk.source_type || "-")} · page ${Number(chunk.page || 0)} · idx ${Number(chunk.chunk_index || 0)}
+      </div>
+      <div class="viz-item__preview">${escapeHtml(chunk.text_preview || "No preview available")}</div>
+    </article>
+  `).join("");
+
+  const grouped = {};
+  for (const chunk of chunks) {
+    const key = chunk.source_path || "(no source path)";
+    grouped[key] = (grouped[key] || 0) + 1;
+  }
+  const entries = Object.entries(grouped).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const max = Math.max(...entries.map((entry) => entry[1]), 1);
+  barsRoot.innerHTML = entries.map(([sourcePath, count]) => `
+    <div class="viz-bar">
+      <div class="viz-bar__row">
+        <span>${escapeHtml(sourcePath.split(/[\\\\/]/).slice(-2).join("/") || sourcePath)}</span>
+        <span>${count} chunks</span>
+      </div>
+      <div class="viz-bar__track">
+        <div class="viz-bar__fill" style="width:${Math.max(6, Math.round((count / max) * 100))}%"></div>
+      </div>
+    </div>
+  `).join("");
+}
+
+async function refreshChunkVisualizer() {
+  try {
+    const [external, internal] = await Promise.all([
+      jget("/rag/preview?namespace=external&limit=18"),
+      jget("/rag/preview?namespace=internal&limit=18")
+    ]);
+    const chunks = [...(external.chunks || []), ...(internal.chunks || [])];
+    renderVisualizer(chunks);
+  } catch (error) {
+    renderVisualizer([]);
+    const summary = el("visualizerSummary");
+    if (summary) summary.textContent = `โหลด preview chunks ไม่สำเร็จ: ${String(error)}`;
+  }
+}
+
 async function uploadSelectedDocument() {
   const input = el("docFile");
   const file = input?.files?.[0];
@@ -206,6 +281,7 @@ async function uploadSelectedDocument() {
   button.disabled = true;
   button.textContent = "Uploading...";
   setNotice([]);
+  setDocNotice([]);
 
   try {
     const form = new FormData();
@@ -214,16 +290,23 @@ async function uploadSelectedDocument() {
       method: "POST",
       body: form
     });
-    const data = await response.json();
-    if (data.status !== "ok") {
-      throw new Error(data.message || data.error || "upload failed");
+    const rawText = await response.text();
+    let data = {};
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      data = { message: rawText };
     }
-    setNotice([`อัปโหลดสำเร็จ: ${file.name}`]);
+    if (!response.ok || data.status !== "ok") {
+      throw new Error(data.message || data.error || `upload failed (${response.status})`);
+    }
+    setDocNotice([`อัปโหลดสำเร็จ: ${file.name}`]);
     input.value = "";
     setSelectedFileText(null);
     await refreshDashboardAndDocuments();
+    await refreshChunkVisualizer();
   } catch (error) {
-    setNotice([`อัปโหลดไม่สำเร็จ: ${String(error)}`]);
+    setDocNotice([`อัปโหลดไม่สำเร็จ: ${String(error)}`]);
   } finally {
     button.disabled = false;
     button.textContent = "Upload PDF";
@@ -414,7 +497,9 @@ function init() {
   renderSources([]);
   switchPage(window.location.hash.replace("#", "") || "chat");
   refreshDashboardAndDocuments();
+  refreshChunkVisualizer();
   setSelectedFileText(null);
+  setDocNotice([]);
   scrollChatToBottom();
 }
 
