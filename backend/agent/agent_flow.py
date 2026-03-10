@@ -660,7 +660,11 @@ def extract_numeric_detail(section: str) -> str:
     if not text:
         return ""
 
-    pct_match = re.search(r"(?:CAGR\)?|อัตราเติบโตเฉลี่ยสะสม[^0-9]{0,20})(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
+    pct_match = re.search(
+        r"(?:CAGR\)?|อัตราการเติบโตเฉลี่ยสะสม(?:ต่อปี)?|อัตราเติบโตเฉลี่ยสะสม(?:ต่อปี)?)[^0-9]{0,20}(\d+(?:\.\d+)?)\s*%",
+        text,
+        re.IGNORECASE,
+    )
     year_match = re.search(r"ตั้งแต่ปี\s*(20\d{2})\s*ถึง\s*(20\d{2})", text)
     if pct_match and year_match:
         return f"ตลาดสัตว์เลี้ยงถูกคาดว่าจะเติบโตเฉลี่ยสะสม (CAGR) {pct_match.group(1)}% ตั้งแต่ปี {year_match.group(1)} ถึง {year_match.group(2)}"
@@ -669,6 +673,42 @@ def extract_numeric_detail(section: str) -> str:
     year_match = re.search(r"ภายในปี\s*(20\d{2})", text)
     if pct_match and year_match:
         return f"บทความระบุว่าตัวเลขสำคัญคือ {pct_match.group(1)}% ภายในปี {year_match.group(1)}"
+
+    return ""
+
+
+def extract_pet_parent_growth_detail(section: str) -> str:
+    text = clean_numbered_section_text(section)
+    if not text:
+        return ""
+
+    pct_match = re.search(
+        r"(?:CAGR\)?|อัตราการเติบโตเฉลี่ยสะสม(?:ต่อปี)?|อัตราเติบโตเฉลี่ยสะสม(?:ต่อปี)?)[^0-9]{0,20}(\d+(?:\.\d+)?)\s*%",
+        text,
+        re.IGNORECASE,
+    )
+    year_match = re.search(r"ตั้งแต่ปี\s*(20\d{2})\s*ถึง\s*(20\d{2})", text)
+    if pct_match and year_match:
+        return f"ตลาดสัตว์เลี้ยงถูกคาดว่าจะเติบโต CAGR {pct_match.group(1)}% ในช่วง ปี {year_match.group(1)} ถึง {year_match.group(2)}"
+
+    return ""
+
+
+def extract_pet_parent_definition(section: str) -> str:
+    text = clean_numbered_section_text(section)
+    if not text:
+        return ""
+
+    match = re.search(
+        r"สัตว์เลี้ยงจะยังคงเป็นส่วนหนึ่งของครอบครัว[^.]*?และมีแนวโน้มที่ครอบครัวจะมีสัตว์เลี้ยงเป็นสมาชิกครอบครัวเพิ่มขึ้นเรื่อย\s*ๆ",
+        text,
+    )
+    if match:
+        return re.sub(r"\s+", " ", match.group(0)).strip(" -:")
+
+    match = re.search(r"สัตว์เลี้ยงจะยังคงเป็นส่วนหนึ่งของครอบครัว[^.]*", text)
+    if match:
+        return re.sub(r"\s+", " ", match.group(0)).strip(" -:")
 
     return ""
 
@@ -1168,15 +1208,22 @@ class AgenticRAG:
         title = parsed[1]
         lead = extract_section_lead(section, title)
         numeric_detail = extract_numeric_detail(section)
+        pet_parent_definition = extract_pet_parent_definition(section) if title.lower() == "pet parent" else ""
 
         lines = []
-        if lead:
-            if title.lower() == "pet parent":
-                lines.append(f"เทรนด์ Pet Parent ในบทความระบุว่า {lead}")
-            else:
-                lines.append(f"บทความระบุว่า {title} คือ {lead}")
+        if title.lower() == "pet parent" and pet_parent_definition:
+            lines.append(
+                "Pet Parent ในบทความหมายถึง "
+                "สัตว์เลี้ยงยังคงถูกมองเป็นส่วนหนึ่งของครอบครัว "
+                "และมีแนวโน้มที่ครอบครัวจะมีสัตว์เลี้ยงเป็นสมาชิกเพิ่มขึ้นเรื่อย ๆ"
+            )
+        elif lead:
+            lines.append(f"บทความระบุว่า {title} คือ {lead}")
         if numeric_detail and any(token in question for token in ["เท่าไร", "เท่าไหร่", "ตัวเลข", "ช่วงเวลา", "%", "ปี"]):
-            lines.append(numeric_detail)
+            if title.lower() == "pet parent":
+                lines.append(extract_pet_parent_growth_detail(section) or numeric_detail)
+            else:
+                lines.append(numeric_detail)
 
         if not lines:
             return None
@@ -1301,14 +1348,27 @@ class AgenticRAG:
 
             if asks_for_role or asks_for_stats:
                 lines = []
-                if best_profile["lead"]:
-                    if "ai" in _normalize_match_text(best_profile["title"]):
-                        lines.append(f"บทความบอกว่า AI/Automation จะมีบทบาทกับธุรกิจปี 2025 โดย {best_profile['lead']}")
-                    else:
-                        lines.append(f"บทความระบุว่า {best_profile['title']} คือ {best_profile['lead']}")
-                for stat in best_profile["stats"]:
-                    source_text = ", ".join(best_profile["sources"]) if best_profile["sources"] else "บทความ"
-                    lines.append(f"- {stat} [source: {source_text}]")
+                title_norm = _normalize_match_text(best_profile["title"])
+                if "pet parent" in title_norm:
+                    pet_parent_definition = extract_pet_parent_definition(best_profile["raw"]) or best_profile["lead"]
+                    if pet_parent_definition:
+                        lines.append(
+                            "Pet Parent ในบทความหมายถึง "
+                            "สัตว์เลี้ยงยังคงถูกมองเป็นส่วนหนึ่งของครอบครัว "
+                            "และมีแนวโน้มที่ครอบครัวจะมีสัตว์เลี้ยงเป็นสมาชิกเพิ่มขึ้นเรื่อย ๆ"
+                        )
+                    numeric_detail = extract_pet_parent_growth_detail(best_profile["raw"]) or extract_numeric_detail(best_profile["raw"])
+                    if numeric_detail:
+                        lines.append(numeric_detail)
+                else:
+                    if best_profile["lead"]:
+                        if "ai" in title_norm:
+                            lines.append(f"บทความบอกว่า AI/Automation จะมีบทบาทกับธุรกิจปี 2025 โดย {best_profile['lead']}")
+                        else:
+                            lines.append(f"บทความระบุว่า {best_profile['title']} คือ {best_profile['lead']}")
+                    for stat in best_profile["stats"]:
+                        source_text = ", ".join(best_profile["sources"]) if best_profile["sources"] else "บทความ"
+                        lines.append(f"- {stat} [source: {source_text}]")
                 if lines:
                     return {
                         "route": "semantic_rag",

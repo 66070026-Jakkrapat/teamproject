@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MLflow Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+Thai:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #edf7ff;
+      --bg-2: #d9efff;
+      --ink: #11233d;
+      --muted: #60748f;
+      --line: rgba(20, 72, 138, 0.16);
+      --panel: rgba(255,255,255,0.92);
+      --panel-strong: rgba(255,255,255,0.98);
+      --blue: #1f7df0;
+      --blue-2: #5aaeff;
+      --blue-3: #0d4ea6;
+      --cyan: #16b5ff;
+      --good: #0fa57a;
+      --shadow: 0 18px 40px rgba(31, 84, 149, 0.14);
+      --radius-xl: 24px;
+      --radius-lg: 18px;
+      --radius-md: 14px;
+      --sans: "Inter", "Noto Sans Thai", system-ui, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 0% 10%, rgba(31,125,240,0.10), transparent 24%),
+        radial-gradient(circle at 100% 0%, rgba(22,181,255,0.12), transparent 22%),
+        linear-gradient(180deg, #f7fbff 0%, var(--bg) 55%, var(--bg-2) 100%);
+    }
+
+    .page {
+      width: min(1320px, calc(100% - 28px));
+      margin: 14px auto 26px;
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    .sidebar {
+      background: linear-gradient(180deg, #0b4f9f, #083f84);
+      color: #eaf5ff;
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      min-height: calc(100vh - 40px);
+    }
+
+    .sidebar__top {
+      padding: 24px 22px 18px;
+      border-bottom: 1px solid rgba(255,255,255,0.10);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand__mark {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #4eb1ff, #88d4ff);
+      display: grid;
+      place-items: center;
+      box-shadow: 0 12px 24px rgba(0,0,0,0.16);
+    }
+
+    .brand__title {
+      font-size: 24px;
+      font-weight: 800;
+      font-style: italic;
+    }
+
+    .brand__sub {
+      margin-top: 2px;
+      color: rgba(234,245,255,0.72);
+      font-size: 12px;
+    }
+
+    .nav {
+      padding: 14px 12px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .nav a {
+      text-decoration: none;
+      color: rgba(234,245,255,0.86);
+      padding: 12px 14px;
+      border-radius: 14px;
+      font-size: 14px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .nav a.active {
+      background: rgba(255,255,255,0.14);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
+    }
+
+    .sidebar__foot {
+      margin-top: auto;
+      padding: 16px 18px 20px;
+      color: rgba(234,245,255,0.72);
+      font-size: 13px;
+    }
+
+    .main {
+      min-width: 0;
+    }
+
+    .hero {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+      padding: 22px 24px;
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-size: 42px;
+      letter-spacing: -0.04em;
+    }
+
+    .hero p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.8;
+    }
+
+    .hero__meta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.84);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .metric-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .metric-card {
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      padding: 16px 18px;
+      text-align: center;
+    }
+
+    .metric-card__label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .metric-card__value {
+      font-size: 40px;
+      font-weight: 800;
+      line-height: 1;
+      color: var(--blue-3);
+    }
+
+    .content {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 18px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel__head {
+      padding: 18px 18px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel__title {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .panel__sub {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .panel__body {
+      padding: 16px 18px 18px;
+    }
+
+    .chart-stack {
+      display: grid;
+      gap: 14px;
+    }
+
+    .chart-card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(245,250,255,0.82);
+      padding: 14px;
+    }
+
+    .chart-card__title {
+      margin: 0 0 12px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .line-chart {
+      display: flex;
+      align-items: end;
+      gap: 8px;
+      height: 160px;
+    }
+
+    .line-chart__bar {
+      flex: 1;
+      border-radius: 10px 10px 0 0;
+      background: linear-gradient(180deg, var(--blue-2), var(--blue));
+      min-height: 8px;
+    }
+
+    .bars {
+      display: flex;
+      align-items: end;
+      gap: 12px;
+      height: 260px;
+    }
+
+    .bar {
+      flex: 1;
+      display: grid;
+      justify-items: center;
+      gap: 8px;
+    }
+
+    .bar__fill {
+      width: min(64px, 100%);
+      border-radius: 12px 12px 0 0;
+      background: linear-gradient(180deg, #78c4ff, #1f7df0);
+      min-height: 12px;
+    }
+
+    .bar__label {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .run-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .run {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(245,250,255,0.82);
+      padding: 14px;
+    }
+
+    .run__title {
+      font-size: 14px;
+      font-weight: 800;
+      margin-bottom: 6px;
+    }
+
+    .run__meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.7;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    @media (max-width: 1120px) {
+      .page {
+        grid-template-columns: 1fr;
+      }
+      .sidebar {
+        min-height: auto;
+      }
+      .metric-row,
+      .content {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 860px) {
+      .metric-row,
+      .content {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <aside class="sidebar">
+      <div class="sidebar__top">
+        <div class="brand">
+          <div class="brand__mark">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 3v18h18"/><path d="M7 14l3-3 3 2 4-6"/>
+            </svg>
+          </div>
+          <div>
+            <div class="brand__title">mlflow</div>
+            <div class="brand__sub">Tracking Dashboard</div>
+          </div>
+        </div>
+      </div>
+      <nav class="nav">
+        <a class="active" href="/ui/mlflow">Dashboard</a>
+        <a href="/UI_FORUSER">User UI</a>
+        <a href="/ui">Console</a>
+      </nav>
+      <div class="sidebar__foot">Blue observability view for MLflow runs and metrics</div>
+    </aside>
+
+    <section class="main">
+      <section class="hero">
+        <h1>MLflow Dashboard</h1>
+        <p>สรุปผล tracking ของ pipeline, evaluation, OCR และ ingest จาก MLflow ในหน้าแยกจาก user-facing UI</p>
+        <div class="hero__meta">
+          <div class="pill" id="trackingUri">Tracking URI: loading</div>
+          <div class="pill" id="mlflowState">State: loading</div>
+        </div>
+      </section>
+
+      <section id="metricCards" class="metric-row">
+        <article class="metric-card"><div class="metric-card__label">Accuracy</div><div class="metric-card__value">--</div></article>
+        <article class="metric-card"><div class="metric-card__label">Recall</div><div class="metric-card__value">--</div></article>
+        <article class="metric-card"><div class="metric-card__label">Faithfulness</div><div class="metric-card__value">--</div></article>
+        <article class="metric-card"><div class="metric-card__label">Relevance</div><div class="metric-card__value">--</div></article>
+      </section>
+
+      <section class="content">
+        <section class="panel">
+          <div class="panel__head">
+            <h2 class="panel__title">Tracking Flow</h2>
+            <p class="panel__sub">Recent metric trends from latest runs</p>
+          </div>
+          <div class="panel__body" id="linePanels">
+            <div class="empty">กำลังโหลด line metrics...</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel__head">
+            <h2 class="panel__title">Performance Metrics</h2>
+            <p class="panel__sub">Aggregated bar view from tracked metrics</p>
+          </div>
+          <div class="panel__body" id="barPanel">
+            <div class="empty">กำลังโหลด bar metrics...</div>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel" style="margin-top:18px;">
+        <div class="panel__head">
+          <h2 class="panel__title">Recent Runs</h2>
+          <p class="panel__sub">Latest runs from configured experiments</p>
+        </div>
+        <div class="panel__body" id="runList">
+          <div class="empty">กำลังโหลด recent runs...</div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/ui/mlflow.js"></script>
+</body>
+</html>

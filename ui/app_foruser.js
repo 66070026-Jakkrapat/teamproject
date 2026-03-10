@@ -7,7 +7,30 @@ async function jpost(url, body) {
   return await r.json();
 }
 
+async function jget(url) {
+  const r = await fetch(url);
+  return await r.json();
+}
+
 const el = (id) => document.getElementById(id);
+const PAGE_META = {
+  dashboard: {
+    title: "Dashboard",
+    desc: "ภาพรวมระบบและเอกสารที่ถูก ingest อยู่ในคลังความรู้"
+  },
+  documents: {
+    title: "Documents",
+    desc: "อัปโหลดและจัดการเอกสารที่ใช้ในระบบ Hybrid RAG"
+  },
+  chat: {
+    title: "AI Chat",
+    desc: "ถามคำถามเกี่ยวกับบทความและข้อมูลที่ ingest ไว้ แล้วให้ระบบสรุปพร้อมอ้างอิงเฉพาะเมื่อจำเป็น"
+  },
+  visualizer: {
+    title: "Chunk Visualizer",
+    desc: "ดูภาพรวมของ chunks และการกระจายของข้อมูลที่ใช้ตอบคำถาม"
+  }
+};
 
 function escapeHtml(value) {
   return String(value || "")
@@ -35,19 +58,60 @@ function setNotice(lines = []) {
 
 function updateCharCount() {
   const size = el("q").value.trim().length;
-  el("charCount").textContent = `${size} chars`;
+  el("charCount").textContent = `${size} ตัวอักษร`;
 }
 
-function setQuestionPreview(text) {
-  el("questionPreview").textContent = text || "No question yet";
+function setSelectedFileText(file) {
+  const node = el("selectedFileText");
+  if (!node) return;
+  node.textContent = file ? `ไฟล์ที่เลือก: ${file.name}` : "ยังไม่ได้เลือกไฟล์";
+}
+
+function switchPage(page) {
+  const current = PAGE_META[page] ? page : "chat";
+  document.querySelectorAll("[data-page]").forEach((node) => {
+    node.classList.toggle("active", node.dataset.page === current);
+  });
+  document.querySelectorAll(".page-section").forEach((node) => {
+    node.classList.toggle("active", node.id === `page-${current}`);
+  });
+  el("pageTitle").textContent = PAGE_META[current].title;
+  el("pageDesc").textContent = PAGE_META[current].desc;
+  if (current === "chat") {
+    scrollChatToBottom();
+  }
+}
+
+function scrollChatToBottom() {
+  const feed = el("chatFeed");
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function appendMessage({ role, text, meta = "", html = "" }) {
+  const feed = el("chatFeed");
+  const isUser = role === "user";
+  const article = document.createElement("article");
+  article.className = `message${isUser ? " message--user" : ""}`;
+  article.innerHTML = `
+    ${isUser ? "" : '<div class="message__avatar">AI</div>'}
+    <div class="message__content">
+      <div class="message__bubble">${html || escapeHtml(text || "")}</div>
+      ${meta ? `<div class="message__meta">${escapeHtml(meta)}</div>` : ""}
+    </div>
+    ${isUser ? '<div class="message__avatar message__avatar--user">You</div>' : ""}
+  `;
+  feed.appendChild(article);
+  scrollChatToBottom();
+  return article;
 }
 
 function renderSources(chunks = []) {
   const root = el("sources");
-  el("sourceCount").textContent = `${chunks.length} chunks`;
+  el("sourceCount").textContent = `${chunks.length} แหล่ง`;
+  el("statSources").textContent = String(chunks.length);
 
   if (!chunks.length) {
-    root.innerHTML = '<div class="empty">Relevant chunks, URLs, scores, and retrieval modes will appear here.</div>';
+    root.innerHTML = '<div class="empty">แหล่งอ้างอิงจะปรากฏที่นี่เมื่อมีข้อมูลที่เกี่ยวข้อง</div>';
     return;
   }
 
@@ -74,43 +138,154 @@ function renderSources(chunks = []) {
   }).join("");
 }
 
+function renderDocuments(docs = []) {
+  const table = el("documentsTableBody");
+  const recent = el("recentDocs");
+  const sub = el("documentsSub");
+  if (!table || !recent || !sub) return;
+
+  sub.textContent = `${docs.length} documents`;
+
+  if (!docs.length) {
+    table.innerHTML = '<tr><td colspan="5" class="empty">ยังไม่มีเอกสารในระบบ</td></tr>';
+    recent.innerHTML = '<div class="empty">ยังไม่มีเอกสารล่าสุด</div>';
+    return;
+  }
+
+  table.innerHTML = docs.map((doc) => `
+    <tr>
+      <td>${escapeHtml(doc.filename || "-")}</td>
+      <td><span class="badge">${escapeHtml(doc.type || "-")}</span></td>
+      <td><span class="badge badge--success">${escapeHtml((doc.status || "completed").toUpperCase())}</span></td>
+      <td>${Number(doc.chunk_count || 0)}</td>
+      <td>${Number(doc.table_row_count || 0)}</td>
+    </tr>
+  `).join("");
+
+  recent.innerHTML = docs.slice(0, 5).map((doc) => `
+    <div class="list-item">
+      <div>
+        <strong>${escapeHtml(doc.filename || "-")}</strong>
+        <div class="card__sub">${Number(doc.chunk_count || 0)} chunks · ${Number(doc.table_row_count || 0)} rows</div>
+      </div>
+      <span class="badge badge--success">${escapeHtml((doc.status || "completed").toUpperCase())}</span>
+    </div>
+  `).join("");
+}
+
+async function refreshDashboardAndDocuments() {
+  try {
+    const [health, docsResp] = await Promise.all([jget("/health"), jget("/documents")]);
+    const docs = docsResp.documents || [];
+    const totalChunks = docs.reduce((sum, doc) => sum + Number(doc.chunk_count || 0), 0);
+    const totalTables = docs.reduce((sum, doc) => sum + Number(doc.table_row_count || 0), 0);
+
+    if (el("dashDocs")) el("dashDocs").textContent = String(docs.length);
+    if (el("dashChunks")) el("dashChunks").textContent = String(totalChunks);
+    if (el("dashTables")) el("dashTables").textContent = String(totalTables);
+    if (el("dashSystem")) el("dashSystem").textContent = health.status === "ok" ? "Online" : "Offline";
+    if (el("dashSystemMeta")) el("dashSystemMeta").textContent = health.status === "ok" ? "All services running" : "Check backend status";
+
+    renderDocuments(docs);
+  } catch (error) {
+    if (el("dashSystem")) el("dashSystem").textContent = "Error";
+    if (el("dashSystemMeta")) el("dashSystemMeta").textContent = "โหลดข้อมูล dashboard ไม่สำเร็จ";
+    renderDocuments([]);
+  }
+}
+
+async function uploadSelectedDocument() {
+  const input = el("docFile");
+  const file = input?.files?.[0];
+  if (!file) {
+    setNotice(["กรุณาเลือกไฟล์ PDF ก่อน"]);
+    return;
+  }
+
+  const button = el("uploadDocBtn");
+  button.disabled = true;
+  button.textContent = "Uploading...";
+  setNotice([]);
+
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await fetch("/pipeline/internal/upload_pdf?entity_hint=internal_doc", {
+      method: "POST",
+      body: form
+    });
+    const data = await response.json();
+    if (data.status !== "ok") {
+      throw new Error(data.message || data.error || "upload failed");
+    }
+    setNotice([`อัปโหลดสำเร็จ: ${file.name}`]);
+    input.value = "";
+    setSelectedFileText(null);
+    await refreshDashboardAndDocuments();
+  } catch (error) {
+    setNotice([`อัปโหลดไม่สำเร็จ: ${String(error)}`]);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Upload PDF";
+  }
+}
+
 async function ask() {
   const question = el("q").value.trim();
   const top_k = parseInt(el("topk").value || "8", 10);
 
   if (!question) {
     setStatus("Need question");
-    setNotice(["Please enter a question first.", "กรุณาพิมพ์คำถามก่อน"]);
+    setNotice(["กรุณาพิมพ์คำถามก่อน"]);
     el("q").focus();
     return;
   }
 
-  setQuestionPreview(question);
+  appendMessage({ role: "user", text: question, meta: "คำถามล่าสุด" });
+  el("q").value = "";
+  updateCharCount();
+  el("promptHint").textContent = "กำลังประมวลผลคำถาม";
   el("btnAsk").disabled = true;
-  el("btnAsk").textContent = "Searching...";
-  el("answer").textContent = "Searching your knowledge base and drafting the answer...\n\nกำลังค้นจากคลังความรู้และสรุปคำตอบ...";
   el("routePill").textContent = "Route: processing";
   setStatus("Searching");
   setNotice([]);
 
+  const loadingNode = appendMessage({
+    role: "assistant",
+    html: "กำลังค้นจากคลังความรู้และสรุปคำตอบ..."
+  });
+
   try {
     const data = await jpost("/ask", { question, top_k });
+    loadingNode.remove();
+
     if (data.status !== "ok") {
-      el("answer").textContent = data.error || data.message || JSON.stringify(data, null, 2);
+      appendMessage({
+        role: "assistant",
+        text: data.error || data.message || JSON.stringify(data, null, 2),
+        meta: "เกิดข้อผิดพลาด"
+      });
       el("routePill").textContent = "Route: error";
       setStatus("Error");
       renderSources([]);
-      setNotice(["Answer generation failed.", data.message || "Unknown error"]);
+      setNotice([data.message || "ไม่สามารถสร้างคำตอบได้"]);
+      el("statMode").textContent = "ERR";
       return;
     }
 
-    el("answer").textContent = data.answer || "No answer";
+    appendMessage({
+      role: "assistant",
+      text: data.answer || "No answer",
+      meta: data.tavily_used ? "Financial Data Agent · fallback" : "Financial Data Agent"
+    });
+
     el("routePill").textContent = `Route: ${data.route || "unknown"}`;
     setStatus(data.tavily_used ? "Answered with fallback" : "Answered");
+    el("statMode").textContent = data.route || "RAG";
 
     const warnings = [...(data.warnings || [])];
     if (data.tavily_used) {
-      warnings.push("Used Tavily fallback for this question.");
+      warnings.push("ใช้ Tavily fallback กับคำถามนี้");
     }
     setNotice(warnings);
 
@@ -120,14 +295,21 @@ async function ask() {
     }));
     renderSources(chunks);
   } catch (err) {
-    el("answer").textContent = String(err);
+    loadingNode.remove();
+    appendMessage({
+      role: "assistant",
+      text: String(err),
+      meta: "Connection error"
+    });
     el("routePill").textContent = "Route: error";
     setStatus("Connection error");
+    el("statMode").textContent = "ERR";
     renderSources([]);
-    setNotice(["Cannot connect to backend.", "ไม่สามารถเชื่อมต่อกับ backend ได้"]);
+    setNotice(["ไม่สามารถเชื่อมต่อกับ backend ได้"]);
   } finally {
     el("btnAsk").disabled = false;
-    el("btnAsk").textContent = "Send";
+    el("promptHint").textContent = "ตัวอย่าง: สรุป 5 เทรนด์ธุรกิจปี 2025";
+    scrollChatToBottom();
   }
 }
 
@@ -136,13 +318,67 @@ function bindQuickQuestions() {
     button.addEventListener("click", () => {
       const value = button.dataset.question || "";
       el("q").value = value;
-      setQuestionPreview(value);
       updateCharCount();
       setNotice([]);
       setStatus("Ready");
-      el("promptHint").textContent = "Ready to ask";
+      el("promptHint").textContent = "พร้อมส่งคำถาม";
       el("q").focus();
     });
+  });
+}
+
+function bindNavigation() {
+  document.querySelectorAll("[data-page]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      const page = link.dataset.page || "chat";
+      window.location.hash = page;
+      switchPage(page);
+    });
+  });
+
+  window.addEventListener("hashchange", () => {
+    switchPage(window.location.hash.replace("#", "") || "chat");
+  });
+}
+
+function bindDocumentUpload() {
+  const input = el("docFile");
+  const browse = el("browseTrigger");
+  const clear = el("clearFileBtn");
+  const upload = el("uploadDocBtn");
+  const zone = document.querySelector(".dropzone");
+  if (!input || !browse || !clear || !upload || !zone) return;
+
+  browse.addEventListener("click", () => input.click());
+  clear.addEventListener("click", () => {
+    input.value = "";
+    setSelectedFileText(null);
+  });
+  upload.addEventListener("click", uploadSelectedDocument);
+  input.addEventListener("change", () => {
+    setSelectedFileText(input.files?.[0] || null);
+  });
+
+  ["dragenter", "dragover"].forEach((eventName) => {
+    zone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      zone.classList.add("dragover");
+    });
+  });
+  ["dragleave", "drop"].forEach((eventName) => {
+    zone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      zone.classList.remove("dragover");
+    });
+  });
+  zone.addEventListener("drop", (event) => {
+    const files = event.dataTransfer?.files;
+    if (!files || !files.length) return;
+    const dt = new DataTransfer();
+    dt.items.add(files[0]);
+    input.files = dt.files;
+    setSelectedFileText(files[0]);
   });
 }
 
@@ -155,12 +391,11 @@ function init() {
   el("q").addEventListener("input", () => {
     const question = el("q").value.trim();
     updateCharCount();
-    setQuestionPreview(question);
     if (question) {
-      el("promptHint").textContent = "Ready to ask";
+      el("promptHint").textContent = "พร้อมส่งคำถาม";
       setStatus("Ready");
     } else {
-      el("promptHint").textContent = "Ask clearly for a better answer";
+      el("promptHint").textContent = "ตัวอย่าง: สรุป 5 เทรนด์ธุรกิจปี 2025";
       setStatus("Ready");
     }
   });
@@ -173,8 +408,14 @@ function init() {
   });
 
   bindQuickQuestions();
+  bindNavigation();
+  bindDocumentUpload();
   updateCharCount();
-  setQuestionPreview("");
+  renderSources([]);
+  switchPage(window.location.hash.replace("#", "") || "chat");
+  refreshDashboardAndDocuments();
+  setSelectedFileText(null);
+  scrollChatToBottom();
 }
 
 init();

@@ -4,30 +4,35 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>UI_FORUSER</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+Thai:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
 
     :root {
-      --bg: #eef5ff;
-      --bg-2: #dfeeff;
-      --panel: rgba(255, 255, 255, 0.92);
-      --panel-strong: rgba(255, 255, 255, 0.98);
-      --line: rgba(26, 73, 135, 0.10);
-      --line-strong: rgba(26, 73, 135, 0.18);
-      --text: #142033;
-      --muted: #65748c;
-      --blue: #1967d2;
-      --blue-2: #0e4fa8;
-      --sky: #eff6ff;
-      --sky-2: #dbeaff;
-      --warn: #9a5a22;
-      --shadow: 0 22px 50px rgba(24, 63, 120, 0.12);
-      --radius-2xl: 30px;
-      --radius-xl: 22px;
+      --bg-primary: #070910;
+      --bg-secondary: #0c1120;
+      --bg-card: rgba(17, 21, 34, 0.76);
+      --bg-card-strong: rgba(19, 24, 39, 0.9);
+      --bg-soft: rgba(255, 255, 255, 0.04);
+      --border: rgba(255, 255, 255, 0.08);
+      --border-strong: rgba(99, 102, 241, 0.34);
+      --text: #f3f6ff;
+      --muted: #94a3b8;
+      --subtle: #64748b;
+      --accent: #7c6cff;
+      --accent-2: #22d3ee;
+      --green: #10b981;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+      --glow: 0 0 34px rgba(124, 108, 255, 0.18);
+      --radius-xl: 24px;
       --radius-lg: 18px;
       --radius-md: 14px;
-      --sans: "Sarabun", "Noto Sans Thai", system-ui, sans-serif;
-      --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+      --sans: "Inter", "Noto Sans Thai", system-ui, sans-serif;
+      --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
     }
 
     html, body { min-height: 100%; }
@@ -37,66 +42,221 @@
       font-family: var(--sans);
       color: var(--text);
       background:
-        radial-gradient(circle at top right, rgba(25, 103, 210, 0.12), transparent 24%),
-        radial-gradient(circle at top left, rgba(81, 147, 255, 0.10), transparent 24%),
-        linear-gradient(180deg, #f5faff 0%, var(--bg) 45%, var(--bg-2) 100%);
+        radial-gradient(1000px 600px at 10% -5%, rgba(124, 108, 255, 0.16), transparent 55%),
+        radial-gradient(900px 620px at 100% 0%, rgba(34, 211, 238, 0.12), transparent 50%),
+        radial-gradient(900px 700px at 50% 100%, rgba(16, 185, 129, 0.08), transparent 55%),
+        linear-gradient(180deg, var(--bg-primary), var(--bg-secondary) 55%, #06080f 100%);
     }
 
-    .page {
-      width: min(1180px, calc(100% - 24px));
-      margin: 18px auto 30px;
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      border-radius: 999px;
+      filter: blur(110px);
+      opacity: 0.22;
+      pointer-events: none;
+      z-index: 0;
     }
 
-    .shell {
-      border-radius: var(--radius-2xl);
-      border: 1px solid rgba(255,255,255,0.68);
-      background: linear-gradient(180deg, rgba(255,255,255,0.78), rgba(248,251,255,0.94));
-      box-shadow: var(--shadow);
-      backdrop-filter: blur(16px);
-      overflow: hidden;
+    body::before {
+      width: 420px;
+      height: 420px;
+      left: -140px;
+      bottom: -140px;
+      background: rgba(124, 108, 255, 0.42);
     }
 
-    .topbar {
+    body::after {
+      width: 460px;
+      height: 460px;
+      top: -140px;
+      right: -120px;
+      background: rgba(34, 211, 238, 0.22);
+    }
+
+    .app-shell {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 326px minmax(0, 1fr);
+    }
+
+    .sidebar {
       display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 16px;
-      padding: 20px 22px 14px;
+      flex-direction: column;
+      min-height: 100vh;
+      padding: 22px 16px;
+      background: linear-gradient(180deg, rgba(16, 20, 33, 0.92), rgba(13, 17, 28, 0.86));
+      border-right: 1px solid var(--border);
+      backdrop-filter: blur(18px);
     }
 
-    .brand {
+    .logo {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 14px;
+      padding: 8px 8px 26px;
     }
 
-    .brand__mark {
-      width: 42px;
-      height: 42px;
-      border-radius: 14px;
-      background:
-        radial-gradient(circle at 32% 28%, rgba(255,255,255,0.62), transparent 32%),
-        linear-gradient(135deg, var(--blue), #5a9dff);
-      box-shadow: 0 12px 26px rgba(25, 103, 210, 0.22);
+    .logo__mark {
+      width: 54px;
+      height: 54px;
+      border-radius: 18px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, var(--accent), #9061ff);
+      box-shadow: var(--glow);
+    }
+
+    .logo__title {
+      font-size: 17px;
+      font-weight: 800;
+      color: #8d7cff;
+    }
+
+    .logo__sub {
+      margin-top: 4px;
+      font-size: 12px;
+      color: var(--subtle);
+    }
+
+    .nav {
+      display: grid;
+      gap: 8px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 16px 18px;
+      border-radius: 18px;
+      color: var(--muted);
+      text-decoration: none;
+      background: transparent;
+      border: 1px solid transparent;
+      transition: all 160ms ease;
+      font-weight: 600;
+    }
+
+    .nav-item:hover,
+    .nav-item.active {
+      color: #8d93ff;
+      background: rgba(124, 108, 255, 0.08);
+      border-color: rgba(124, 108, 255, 0.35);
+      box-shadow: var(--glow);
+    }
+
+    .nav-item svg {
       flex: 0 0 auto;
     }
 
-    .brand__title {
-      font-size: 22px;
-      font-weight: 800;
-      letter-spacing: -0.03em;
+    .sidebar-card {
+      margin-top: 22px;
+      padding: 16px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: var(--bg-soft);
+      backdrop-filter: blur(18px);
     }
 
-    .brand__sub {
-      margin-top: 2px;
+    .sidebar-card__title {
+      margin: 0 0 6px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .sidebar-card__sub {
+      margin: 0 0 14px;
       color: var(--muted);
       font-size: 12px;
+      line-height: 1.6;
     }
 
-    .topbar__status {
+    .starter-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .starter {
+      width: 100%;
+      text-align: left;
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      transition: all 160ms ease;
+    }
+
+    .starter:hover {
+      transform: translateY(-1px);
+      border-color: var(--border-strong);
+      background: rgba(255, 255, 255, 0.06);
+    }
+
+    .starter__title {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .starter__meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .sidebar-footer {
+      margin-top: auto;
+      padding: 20px 10px 6px;
+      color: var(--muted);
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+    }
+
+    .main {
+      min-width: 0;
+      padding: 36px 38px 28px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 24px;
+    }
+
+    .page-head h1 {
+      margin: 0;
+      font-size: clamp(34px, 5vw, 52px);
+      letter-spacing: -0.04em;
+    }
+
+    .page-head p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .status-row {
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
+      margin-top: 18px;
     }
 
     .pill {
@@ -105,118 +265,43 @@
       gap: 8px;
       padding: 10px 14px;
       border-radius: 999px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.86);
-      color: var(--text);
-      font-size: 12px;
-      font-weight: 700;
-    }
-
-    .hero {
-      padding: 0 22px 18px;
-    }
-
-    .hero h1 {
-      margin: 0;
-      font-size: clamp(30px, 4vw, 48px);
-      line-height: 1.02;
-      letter-spacing: -0.04em;
-      font-weight: 800;
-      max-width: 880px;
-    }
-
-    .hero p {
-      margin: 12px 0 0;
-      color: var(--muted);
-      font-size: 15px;
-      line-height: 1.8;
-      max-width: 760px;
-    }
-
-    .content {
-      display: grid;
-      grid-template-columns: 300px minmax(0, 1fr);
-      gap: 18px;
-      padding: 0 22px 22px;
-      align-items: start;
-    }
-
-    .sidebar {
-      display: grid;
-      gap: 14px;
-    }
-
-    .panel {
-      border-radius: var(--radius-xl);
-      border: 1px solid var(--line);
-      background: var(--panel);
-      box-shadow: 0 10px 28px rgba(24, 63, 120, 0.05);
-    }
-
-    .panel--side {
-      padding: 16px;
-    }
-
-    .panel--main {
-      padding: 18px;
-      background: var(--panel-strong);
-    }
-
-    .panel-title {
-      margin: 0 0 6px;
-      font-size: 16px;
-      font-weight: 700;
-    }
-
-    .panel-sub {
-      margin: 0;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.7;
-    }
-
-    .starter-list {
-      display: grid;
-      gap: 10px;
-      margin-top: 14px;
-    }
-
-    .starter {
-      width: 100%;
-      text-align: left;
-      padding: 14px;
-      border-radius: 16px;
-      border: 1px solid var(--line);
-      background: #fff;
-      cursor: pointer;
-      font: inherit;
-      color: var(--text);
-    }
-
-    .starter__title {
-      font-size: 13px;
-      font-weight: 700;
-      margin-bottom: 6px;
-    }
-
-    .starter__meta {
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
       color: var(--muted);
       font-size: 12px;
-      line-height: 1.6;
+      font-weight: 700;
     }
 
     .workspace {
+      min-height: 0;
       display: grid;
-      gap: 14px;
+      grid-template-columns: minmax(0, 1fr) 330px;
+      gap: 24px;
+    }
+
+    .page-section {
+      display: none;
+      min-height: 0;
+    }
+
+    .page-section.active {
+      display: block;
+    }
+
+    .chat-panel {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+      gap: 20px;
     }
 
     .notice {
       display: none;
       padding: 12px 14px;
       border-radius: 16px;
-      border: 1px solid rgba(154, 90, 34, 0.16);
-      background: rgba(154, 90, 34, 0.08);
-      color: var(--warn);
+      border: 1px solid rgba(245, 158, 11, 0.22);
+      background: rgba(245, 158, 11, 0.08);
+      color: #ffd38a;
       font-size: 13px;
       line-height: 1.7;
     }
@@ -225,73 +310,132 @@
       display: block;
     }
 
-    .question-card,
-    .answer-card {
-      border-radius: var(--radius-xl);
-      border: 1px solid var(--line);
-      background: var(--panel-strong);
-      padding: 18px;
+    .chat-feed {
+      min-height: 520px;
+      overflow: auto;
+      padding-right: 8px;
+      display: grid;
+      align-content: start;
+      gap: 18px;
     }
 
-    .question-card {
-      background: linear-gradient(180deg, #ffffff, #f8fbff);
+    .chat-feed::-webkit-scrollbar {
+      width: 6px;
     }
 
-    .question-label,
-    .answer-label {
-      margin-bottom: 10px;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
+    .chat-feed::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
     }
 
-    .question-preview,
-    .answer-body {
-      margin: 0;
+    .message {
+      display: flex;
+      gap: 14px;
+      align-items: flex-start;
+    }
+
+    .message--user {
+      justify-content: flex-end;
+    }
+
+    .message__avatar {
+      width: 46px;
+      height: 46px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--accent), #6b79ff);
+      box-shadow: var(--glow);
+    }
+
+    .message__avatar--user {
+      background: linear-gradient(135deg, #1d4ed8, #06b6d4);
+    }
+
+    .message__content {
+      max-width: min(720px, 92%);
+    }
+
+    .message__bubble {
+      padding: 22px 24px;
+      border-radius: 24px;
+      border: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(18, 23, 37, 0.92), rgba(14, 18, 30, 0.92));
+      box-shadow: var(--shadow);
       white-space: pre-wrap;
       word-break: break-word;
-      font-family: var(--sans);
-      line-height: 1.9;
-      color: var(--text);
-    }
-
-    .question-preview {
+      line-height: 1.85;
       font-size: 16px;
     }
 
-    .answer-body {
-      font-size: 16px;
-      min-height: 260px;
+    .message--user .message__bubble {
+      background: linear-gradient(180deg, rgba(22, 36, 66, 0.96), rgba(17, 28, 52, 0.96));
+      border-color: rgba(34, 211, 238, 0.24);
+    }
+
+    .message__meta {
+      margin-top: 10px;
+      color: var(--subtle);
+      font-size: 13px;
+    }
+
+    .welcome-list {
+      margin: 14px 0 0 22px;
+      padding: 0;
+    }
+
+    .welcome-list li {
+      margin-bottom: 8px;
+    }
+
+    .method-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      margin-right: 8px;
+    }
+
+    .method-badge--vector {
+      background: rgba(34, 211, 238, 0.14);
+      color: #22d3ee;
+    }
+
+    .method-badge--sql {
+      background: rgba(245, 158, 11, 0.14);
+      color: #fbbf24;
+    }
+
+    .method-badge--hybrid {
+      background: rgba(124, 108, 255, 0.16);
+      color: #a78bfa;
     }
 
     .composer {
-      border-radius: var(--radius-xl);
-      border: 1px solid var(--line-strong);
-      background: linear-gradient(180deg, #ffffff, #f8fbff);
-      padding: 16px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      align-items: end;
+      padding-top: 14px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
     }
 
-    .composer__top {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+    .composer__stack {
+      display: grid;
       gap: 10px;
-      flex-wrap: wrap;
-      margin-bottom: 10px;
-    }
-
-    .composer__hint {
-      color: var(--muted);
-      font-size: 12px;
     }
 
     .composer__meta {
       display: flex;
+      align-items: center;
       gap: 10px;
       flex-wrap: wrap;
-      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
     }
 
     .meta-pill {
@@ -300,121 +444,291 @@
       gap: 8px;
       padding: 8px 12px;
       border-radius: 999px;
-      border: 1px solid var(--line);
-      background: var(--sky);
-      color: var(--muted);
-      font-size: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
     }
 
     .meta-pill input {
-      width: 64px;
-      padding: 6px 8px;
+      width: 56px;
+      padding: 4px 8px;
       border-radius: 999px;
-      border: 1px solid var(--line);
-      background: #fff;
+      border: 1px solid var(--border);
+      background: rgba(0, 0, 0, 0.22);
       color: var(--text);
       font: inherit;
       text-align: center;
     }
 
-    .composer__input {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 10px;
-      align-items: end;
-    }
-
-    .prompt-wrap {
-      position: relative;
-    }
-
     .prompt {
       width: 100%;
-      min-height: 100px;
+      min-height: 66px;
+      max-height: 180px;
       resize: vertical;
-      padding: 14px 16px 42px;
       border-radius: 18px;
-      border: 1px solid var(--line);
-      background: #fff;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
       color: var(--text);
       font: inherit;
       font-size: 15px;
-      line-height: 1.8;
+      line-height: 1.75;
+      padding: 18px 20px;
       outline: none;
     }
 
     .prompt:focus {
-      border-color: rgba(25, 103, 210, 0.24);
-      box-shadow: 0 0 0 4px rgba(25, 103, 210, 0.07);
+      border-color: var(--border-strong);
+      box-shadow: 0 0 0 4px rgba(124, 108, 255, 0.08);
     }
 
-    .prompt__meta {
-      position: absolute;
-      left: 14px;
-      right: 14px;
-      bottom: 12px;
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      color: var(--muted);
-      font-size: 11px;
-      pointer-events: none;
+    .prompt::placeholder {
+      color: var(--subtle);
     }
 
     .send-btn {
+      width: 72px;
+      height: 72px;
       border: 0;
-      border-radius: 18px;
-      padding: 0 18px;
-      min-width: 118px;
-      height: 100px;
-      background: linear-gradient(135deg, var(--blue), var(--blue-2));
+      border-radius: 20px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, var(--accent), #6f84ff);
       color: #fff;
-      font: inherit;
-      font-size: 14px;
-      font-weight: 800;
+      box-shadow: var(--glow);
       cursor: pointer;
-      box-shadow: 0 16px 34px rgba(25, 103, 210, 0.18);
     }
 
     .send-btn:disabled {
-      opacity: 0.72;
+      opacity: 0.7;
       cursor: wait;
       box-shadow: none;
     }
 
-    .sources-drawer {
-      border-radius: var(--radius-lg);
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.84);
+    .side-panel {
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+
+    .card {
+      border-radius: var(--radius-xl);
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      backdrop-filter: blur(18px);
+      box-shadow: var(--shadow);
       overflow: hidden;
     }
 
-    .sources-drawer summary {
-      list-style: none;
-      cursor: pointer;
+    .grid-cards {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 24px;
+      margin-top: 24px;
+    }
+
+    .list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .list-item {
       display: flex;
-      justify-content: space-between;
       align-items: center;
-      gap: 10px;
-      padding: 12px 14px;
-      font-size: 13px;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .list-item:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
       font-weight: 700;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+    }
+
+    .badge--success {
+      color: #34d399;
+      background: rgba(16,185,129,0.12);
+    }
+
+    .badge--info {
+      color: #8d93ff;
+      background: rgba(124,108,255,0.12);
+    }
+
+    .dropzone {
+      border: 2px dashed rgba(124, 108, 255, 0.75);
+      border-radius: 28px;
+      min-height: 250px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      color: var(--muted);
+      background: rgba(255,255,255,0.02);
+    }
+
+    .dropzone.dragover {
+      border-color: var(--accent-2);
+      background: rgba(34, 211, 238, 0.08);
+    }
+
+    .dropzone strong {
       color: var(--text);
     }
 
-    .sources-drawer summary::-webkit-details-marker { display: none; }
+    .dropzone__browse {
+      color: #8d93ff;
+      font-weight: 700;
+      cursor: pointer;
+    }
 
-    .sources-inner {
-      padding: 0 14px 14px;
+    .dropzone__actions {
+      margin-top: 16px;
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.05);
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      text-decoration: none;
+    }
+
+    .btn--primary {
+      background: linear-gradient(135deg, var(--accent), #6f84ff);
+      border-color: rgba(124, 108, 255, 0.45);
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      color: var(--text);
+    }
+
+    .table th,
+    .table td {
+      padding: 14px 12px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      font-size: 14px;
+    }
+
+    .table th {
+      color: var(--subtle);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .chart-box {
+      min-height: 420px;
+      border-radius: 22px;
+      border: 1px solid var(--border);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)),
+        radial-gradient(circle at 15% 20%, rgba(124,108,255,0.14), transparent 28%),
+        radial-gradient(circle at 82% 70%, rgba(34,211,238,0.12), transparent 24%);
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      text-align: center;
+      padding: 20px;
+    }
+
+
+    .card__head {
+      padding: 18px 18px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .card__title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .card__sub {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .card__body {
+      padding: 16px 18px 18px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .stat {
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .stat__label {
+      color: var(--subtle);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .stat__value {
+      margin-top: 8px;
+      font-size: 28px;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .stat__meta {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .source-list {
       display: grid;
       gap: 10px;
     }
 
     .source {
       padding: 14px;
-      border-radius: 14px;
-      border: 1px solid var(--line);
-      background: #fff;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
     }
 
     .source__title {
@@ -427,7 +741,7 @@
       margin: 0 0 8px;
       color: var(--muted);
       font-size: 12px;
-      line-height: 1.6;
+      line-height: 1.55;
     }
 
     .source__preview {
@@ -436,143 +750,329 @@
       word-break: break-word;
       font-family: var(--sans);
       font-size: 13px;
+      color: #d6ddf3;
       line-height: 1.7;
-      color: #2c3a4e;
     }
 
-    .empty {
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.75;
+    details.sources-drawer summary {
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    details.sources-drawer summary::-webkit-details-marker {
+      display: none;
     }
 
     .count {
       padding: 6px 10px;
       border-radius: 999px;
-      background: var(--sky);
-      border: 1px solid var(--line);
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
       color: var(--muted);
       font-size: 12px;
       font-weight: 700;
     }
 
-    .footer {
-      padding: 0 22px 22px;
+    .empty {
       color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .footer {
+      color: var(--subtle);
       font-size: 12px;
     }
 
-    .mono { font-family: var(--mono); }
+    .mono {
+      font-family: var(--mono);
+    }
 
-    @media (max-width: 980px) {
-      .page {
-        width: min(100% - 12px, 1180px);
+    @media (max-width: 1180px) {
+      .workspace {
+        grid-template-columns: 1fr;
       }
 
-      .content,
-      .composer__input {
+      .grid-cards,
+      .grid-2 {
+        grid-template-columns: 1fr 1fr;
+      }
+
+    }
+
+    @media (max-width: 980px) {
+      .app-shell {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        min-height: auto;
+        padding-bottom: 20px;
+      }
+
+      .main {
+        padding: 24px 16px 22px;
+      }
+
+      .composer {
         grid-template-columns: 1fr;
       }
 
       .send-btn {
         width: 100%;
-        height: 56px;
+        height: 58px;
       }
+
+      .grid-cards,
+      .grid-2 {
+        grid-template-columns: 1fr;
+      }
+
     }
   </style>
 </head>
 <body>
-  <main class="page">
-    <section class="shell">
-      <header class="topbar">
-        <div class="brand">
-          <div class="brand__mark" aria-hidden="true"></div>
-          <div>
-            <div class="brand__title">Ask AI</div>
-            <div class="brand__sub">Thai Business Insight · Blue Edition</div>
-          </div>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="logo">
+        <div class="logo__mark" aria-hidden="true">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+            <path d="M2 17l10 5 10-5"/>
+            <path d="M2 12l10 5 10-5"/>
+          </svg>
         </div>
-        <div class="topbar__status">
+        <div>
+          <div class="logo__title">FinAgent</div>
+          <div class="logo__sub">Hybrid RAG</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <a class="nav-item" href="#dashboard" data-page="dashboard">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+            <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+          </svg>
+          <span>Dashboard</span>
+        </a>
+        <a class="nav-item" href="#documents" data-page="documents">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+          </svg>
+          <span>Documents</span>
+        </a>
+        <a class="nav-item active" href="#chat" data-page="chat">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span>AI Chat</span>
+        </a>
+        <a class="nav-item" href="#visualizer" data-page="visualizer">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+          <span>Chunk Visualizer</span>
+        </a>
+      </nav>
+
+      <section class="sidebar-card">
+        <h2 class="sidebar-card__title">Quick Prompts</h2>
+        <p class="sidebar-card__sub">เลือกคำถามเริ่มต้นแล้วส่งต่อได้ทันที</p>
+        <div class="starter-list">
+          <button class="starter" type="button" data-question="บทความนี้สรุป 5 เทรนด์ธุรกิจปี 2025 สำหรับ SME มีอะไรบ้าง? ตอบเป็นรายการ 1–5 พร้อมคำอธิบายสั้น ๆ">
+            <div class="starter__title">5 SME trends</div>
+            <div class="starter__meta">สรุปเทรนด์จากบทความหลัก</div>
+          </button>
+          <button class="starter" type="button" data-question="สรุปเทรนด์ธุรกิจไทยที่สำคัญจากข้อมูลที่ ingest ไว้ พร้อมบอกแหล่งอ้างอิงหลัก">
+            <div class="starter__title">Business summary</div>
+            <div class="starter__meta">สรุปพร้อมแหล่งอ้างอิง</div>
+          </button>
+          <button class="starter" type="button" data-question="เปรียบเทียบข้อมูลจาก internal และ external ที่เกี่ยวกับลูกค้าธุรกิจ พร้อมสรุปความต่างหลัก">
+            <div class="starter__title">Compare insights</div>
+            <div class="starter__meta">เทียบข้อมูลข้ามแหล่ง</div>
+          </button>
+        </div>
+      </section>
+
+      <div class="sidebar-footer">
+        <span class="status-dot"></span>
+        <span>System Online</span>
+      </div>
+    </aside>
+
+    <section class="main">
+      <header class="page-head">
+        <h1 id="pageTitle">AI Chat</h1>
+        <p id="pageDesc">ถามคำถามเกี่ยวกับบทความและข้อมูลที่ ingest ไว้ แล้วให้ระบบสรุปพร้อมอ้างอิงเฉพาะเมื่อจำเป็น</p>
+        <div class="status-row">
           <div class="pill" id="routePill">Route: waiting</div>
           <div class="pill" id="statusPill">Ready</div>
         </div>
       </header>
 
-      <section class="hero">
-        <h1>Ask in Thai or English. อ่านคำตอบง่าย และเปิดดู sources เองเมื่อจำเป็น</h1>
-        <p>คำถามอยู่ด้านบน คำตอบอยู่ด้านล่าง และแหล่งอ้างอิงถูกซ่อนไว้ก่อนเพื่อให้หน้าใช้งานสะอาดขึ้น</p>
-      </section>
-
-      <section class="content">
-        <aside class="sidebar">
-          <section class="panel panel--side">
-            <h2 class="panel-title">Starter Questions</h2>
-            <p class="panel-sub">เลือกคำถามเริ่มต้นพร้อมดูว่า keyword และ source อ้างอิงมาจากอะไร</p>
-            <div class="starter-list">
-              <button class="starter" type="button" data-question="บทความนี้สรุป 5 เทรนด์ธุรกิจปี 2025 สำหรับ SME มีอะไรบ้าง? ตอบเป็นรายการ 1–5 พร้อมคำอธิบายสั้น ๆ">
-                <div class="starter__title">5 SME trends in 2025</div>
-                <div class="starter__meta">Keyword: เทรนด์ธุรกิจ SME 2025<br>Source: ttb article</div>
-              </button>
-              <button class="starter" type="button" data-question="สรุปเทรนด์ธุรกิจไทยที่สำคัญจากข้อมูลที่ ingest ไว้ พร้อมบอกแหล่งอ้างอิงหลัก">
-                <div class="starter__title">Thai business trends summary</div>
-                <div class="starter__meta">Keyword: เทรนด์ธุรกิจไทย<br>Source: ingested web pages</div>
-              </button>
-              <button class="starter" type="button" data-question="Compare internal and external insights related to business customers and summarize the main differences.">
-                <div class="starter__title">Compare insights</div>
-                <div class="starter__meta">Keyword: business customers<br>Source: internal + external RAG</div>
-              </button>
+      <section id="page-dashboard" class="page-section">
+        <div class="grid-cards">
+          <section class="card"><div class="card__body"><div class="stat__label">Documents</div><div class="stat__value" id="dashDocs">0</div><div class="stat__meta">Total uploaded</div></div></section>
+          <section class="card"><div class="card__body"><div class="stat__label">Chunks</div><div class="stat__value" id="dashChunks">0</div><div class="stat__meta">Semantic + LLM</div></div></section>
+          <section class="card"><div class="card__body"><div class="stat__label">Table Rows</div><div class="stat__value" id="dashTables">0</div><div class="stat__meta">Structured Data</div></div></section>
+          <section class="card"><div class="card__body"><div class="stat__label">System</div><div class="stat__value" id="dashSystem" style="color:#34d399;">Online</div><div class="stat__meta" id="dashSystemMeta">All services running</div></div></section>
+        </div>
+        <div class="grid-2">
+          <section class="card">
+            <div class="card__head"><h2 class="card__title">Recent Documents</h2><p class="card__sub">Last uploaded files</p></div>
+            <div class="card__body list" id="recentDocs">
+              <div class="empty">กำลังโหลดรายการเอกสาร...</div>
             </div>
           </section>
-        </aside>
+          <section class="card">
+            <div class="card__head"><h2 class="card__title">Pipeline Overview</h2><p class="card__sub">Data processing pipeline</p></div>
+            <div class="card__body list">
+              <div class="list-item"><span><span class="badge badge--info">1</span> Upload / Ingest</span></div>
+              <div class="list-item"><span><span class="badge badge--info">2</span> OCR + Extraction</span></div>
+              <div class="list-item"><span><span class="badge badge--info">3</span> Thai Text Cleaning</span></div>
+              <div class="list-item"><span><span class="badge badge--info">4</span> Semantic + LLM Chunking</span></div>
+              <div class="list-item"><span><span class="badge badge--info">5</span> Hybrid RAG</span></div>
+            </div>
+          </section>
+        </div>
+      </section>
 
-        <section class="workspace">
+      <section id="page-documents" class="page-section">
+        <div class="grid-2" style="margin-top:0;">
+          <section class="card" style="grid-column:1 / -1;">
+            <div class="card__head"><h2 class="card__title">Upload Document</h2><p class="card__sub">อัปโหลดและจัดการเอกสารการเงิน</p></div>
+            <div class="card__body">
+              <div class="dropzone">
+                <div>
+                  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom:12px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  <input id="docFile" type="file" accept=".pdf,application/pdf" hidden />
+                  <div><strong>Drag & drop files here</strong> or <span class="dropzone__browse" id="browseTrigger">browse</span></div>
+                  <div class="card__sub">Supports PDF upload to internal pipeline</div>
+                  <div class="dropzone__actions">
+                    <button class="btn" id="clearFileBtn" type="button">Clear</button>
+                    <button class="btn btn--primary" id="uploadDocBtn" type="button">Upload PDF</button>
+                  </div>
+                  <div class="card__sub" id="selectedFileText" style="margin-top:12px;">ยังไม่ได้เลือกไฟล์</div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="card" style="grid-column:1 / -1;">
+            <div class="card__head"><h2 class="card__title">All Documents</h2><p class="card__sub" id="documentsSub">0 documents</p></div>
+            <div class="card__body">
+              <table class="table">
+                <thead><tr><th>Filename</th><th>Type</th><th>Status</th><th>Chunks</th><th>Tables</th></tr></thead>
+                <tbody id="documentsTableBody">
+                  <tr><td colspan="5" class="empty">กำลังโหลดรายการเอกสาร...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="page-chat" class="page-section active">
+      <section class="workspace">
+        <div class="chat-panel">
           <div id="notice" class="notice" data-visible="false"></div>
 
-          <section class="question-card">
-            <div class="question-label">Question · คำถาม</div>
-            <pre id="questionPreview" class="question-preview">No question yet</pre>
-          </section>
+          <section id="chatFeed" class="chat-feed">
+            <article class="message">
+              <div class="message__avatar">AI</div>
+              <div class="message__content">
+                <div class="message__bubble">
+สวัสดีครับ! ผมเป็น Financial Data Agent
 
-          <section class="answer-card">
-            <div class="answer-label">Answer · คำตอบ</div>
-            <pre id="answer" class="answer-body">Your answer will appear here.
-
-คำตอบจะแสดงที่นี่หลังจากส่งคำถาม</pre>
+ผมช่วยตอบคำถามจาก knowledge base ที่ถูก ingest ไว้ได้ เช่น
+<ul class="welcome-list">
+  <li><span class="method-badge method-badge--vector">Vector</span>สรุป อธิบาย และดึงประเด็นสำคัญจากบทความ</li>
+  <li><span class="method-badge method-badge--sql">SQL</span>ตอบคำถามเชิงตัวเลขหรือข้อมูลเชิงโครงสร้าง</li>
+  <li><span class="method-badge method-badge--hybrid">Hybrid</span>ผสานหลายแหล่งเพื่อให้คำตอบกระชับขึ้น</li>
+</ul>
+                </div>
+                <div class="message__meta">Financial Data Agent</div>
+              </div>
+            </article>
           </section>
 
           <form id="askForm" class="composer">
-            <div class="composer__top">
-              <div class="composer__hint">Thai / English supported</div>
+            <div class="composer__stack">
               <div class="composer__meta">
                 <label class="meta-pill">
                   <span>Top K</span>
                   <input id="topk" type="number" min="3" max="30" value="8" />
                 </label>
-                <div class="meta-pill">Ctrl/Cmd + Enter</div>
+                <span id="promptHint">ตัวอย่าง: สรุป 5 เทรนด์ธุรกิจปี 2025</span>
+                <span id="charCount">0 ตัวอักษร</span>
               </div>
+              <textarea id="q" class="prompt" placeholder="ถามคำถามเกี่ยวกับข้อมูลที่มีอยู่..."></textarea>
             </div>
-
-            <div class="composer__input">
-              <div class="prompt-wrap">
-                <textarea id="q" class="prompt" placeholder="Ask in Thai or English...&#10;&#10;ตัวอย่าง: บทความนี้สรุป 5 เทรนด์ธุรกิจปี 2025 สำหรับ SME มีอะไรบ้าง? ตอบเป็นรายการ 1–5 พร้อมคำอธิบายสั้น ๆ"></textarea>
-                <div class="prompt__meta">
-                  <span id="promptHint">Ask clearly for a better answer</span>
-                  <span id="charCount">0 chars</span>
-                </div>
-              </div>
-              <button id="btnAsk" class="send-btn" type="submit">Send</button>
-            </div>
+            <button id="btnAsk" class="send-btn" type="submit" aria-label="Send question">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
           </form>
+        </div>
 
-          <details class="sources-drawer" id="sourcesDrawer">
-            <summary>
-              <span>Sources · แหล่งอ้างอิง</span>
-              <span id="sourceCount" class="count">0 chunks</span>
+        <aside class="side-panel">
+          <section class="card">
+            <div class="card__head">
+              <h2 class="card__title">Overview</h2>
+              <p class="card__sub">สถานะโดยรวมของหน้า AI Chat</p>
+            </div>
+            <div class="card__body">
+              <div class="stats">
+                <article class="stat">
+                  <div class="stat__label">Mode</div>
+                  <div class="stat__value" id="statMode">RAG</div>
+                  <div class="stat__meta">semantic route</div>
+                </article>
+                <article class="stat">
+                  <div class="stat__label">Sources</div>
+                  <div class="stat__value" id="statSources">0</div>
+                  <div class="stat__meta">retrieved chunks</div>
+                </article>
+              </div>
+            </div>
+          </section>
+
+          <details class="card sources-drawer" id="sourcesDrawer">
+            <summary class="card__head">
+              <div>
+                <h2 class="card__title">Sources</h2>
+                <p class="card__sub">เปิดดูแหล่งอ้างอิงเมื่อจำเป็น</p>
+              </div>
+              <span id="sourceCount" class="count">0 แหล่ง</span>
             </summary>
-            <div id="sources" class="sources-inner">
-              <div class="empty">Relevant chunks, URLs, scores, and retrieval modes will appear here.</div>
+            <div class="card__body">
+              <div id="sources" class="source-list">
+                <div class="empty">แหล่งอ้างอิงจะปรากฏที่นี่เมื่อมีข้อมูลที่เกี่ยวข้อง</div>
+              </div>
             </div>
           </details>
+        </aside>
+      </section>
+      </section>
+
+      <section id="page-visualizer" class="page-section">
+        <section class="card">
+          <div class="card__head"><h2 class="card__title">Chunk Visualizer</h2><p class="card__sub">ดูภาพรวมของ chunks และ retrieval patterns</p></div>
+          <div class="card__body">
+            <div class="chart-box">
+              <div>
+                <strong>Chunk Visualizer</strong>
+                <div class="card__sub" style="margin-top:10px;">พื้นที่นี้พร้อมสำหรับแสดง semantic chunks, score distribution และ source coverage</div>
+              </div>
+            </div>
+          </div>
         </section>
       </section>
 

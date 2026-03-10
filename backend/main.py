@@ -33,7 +33,7 @@ from backend.scraping.web_scraping import run_external_scrape
 from backend.scraping.facebook_scraping import scrape_facebook_post_html
 from backend.vision.image_understanding import caption_images_with_blip_and_translate
 from backend.ocr.ocr_pipeline import process_folder_pdfs
-from backend.rag.rag_store import RAGStore
+from backend.rag.rag_store import RAGStore, RAGChunk, RAGFact
 from backend.rag.ingest import ingest_main_folder, ingest_text_blob
 from backend.agent.agent_flow import AgenticRAG
 from backend.agent import prompts as agent_prompts
@@ -109,6 +109,203 @@ def _summarize_ocr(out_root: str) -> Dict[str, Any]:
                     elif obj.get("type") == "figure":
                         summary["ocr_figures"] += 1
     return summary
+
+
+def _document_display_name(source_path: str, source_type: str) -> str:
+    if not source_path:
+        return source_type or "unknown"
+    base = os.path.basename(source_path.rstrip("\\/"))
+    if base.lower() in {"content.txt", "outline.json"}:
+        parent = os.path.basename(os.path.dirname(source_path.rstrip("\\/")))
+        return parent or base
+    return base
+
+
+def _document_type_label(source_type: str) -> str:
+    source_type = (source_type or "").strip().lower()
+    if "internal_pdf" in source_type:
+        return "INTERNAL_PDF"
+    if "web" in source_type:
+        return "WEB_INGEST"
+    if source_type:
+        return source_type.upper()
+    return "UNKNOWN"
+
+
+async def _collect_documents_summary() -> list[Dict[str, Any]]:
+    async with store.SessionLocal() as db:
+        chunk_rows = (await db.execute(
+            RAGChunk.__table__.select().order_by(RAGChunk.namespace, RAGChunk.source_path, RAGChunk.chunk_index)
+        )).mappings().all()
+        fact_rows = (await db.execute(
+            RAGFact.__table__.select().order_by(RAGFact.namespace, RAGFact.source_path)
+        )).mappings().all()
+
+    docs: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    for row in chunk_rows:
+        key = (row["namespace"] or "", row["source_path"] or "", row["source_type"] or "")
+        item = docs.setdefault(key, {
+            "namespace": row["namespace"] or "",
+            "source_path": row["source_path"] or "",
+            "source_type": row["source_type"] or "",
+            "filename": _document_display_name(row["source_path"] or "", row["source_type"] or ""),
+            "type": _document_type_label(row["source_type"] or ""),
+            "chunk_count": 0,
+            "table_row_count": 0,
+            "pages": set(),
+            "status": "completed",
+            "updated_at": "",
+        })
+        item["chunk_count"] += 1
+        if int(row.get("page") or 0) > 0:
+            item["pages"].add(int(row.get("page") or 0))
+        source_path = row["source_path"] or ""
+        if source_path and os.path.exists(source_path):
+            ts = os.path.getmtime(source_path)
+            iso = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+            if iso > item["updated_at"]:
+                item["updated_at"] = iso
+
+    for row in fact_rows:
+        key = (row["namespace"] or "", row["source_path"] or "", row["source_type"] or "")
+        item = docs.setdefault(key, {
+            "namespace": row["namespace"] or "",
+            "source_path": row["source_path"] or "",
+            "source_type": row["source_type"] or "",
+            "filename": _document_display_name(row["source_path"] or "", row["source_type"] or ""),
+            "type": _document_type_label(row["source_type"] or ""),
+            "chunk_count": 0,
+            "table_row_count": 0,
+            "pages": set(),
+            "status": "completed",
+            "updated_at": "",
+        })
+        item["table_row_count"] += 1
+
+    out = []
+    for item in docs.values():
+        pages = sorted(item.pop("pages"))
+        item["page_count"] = len(pages)
+        out.append(item)
+
+    out.sort(key=lambda x: (x.get("updated_at") or "", x.get("filename") or ""), reverse=True)
+    return out
+
+
+def _format_metric_value(value: Any, kind: str = "ratio") -> str:
+    if value is None:
+        return "--"
+    try:
+        value = float(value)
+    except Exception:
+        return str(value)
+    if kind == "percent":
+        return f"{round(value * 100)}%"
+    if kind == "ms":
+        return f"{round(value)}ms"
+    return f"{value:.2f}"
+
+
+def _collect_mlflow_summary() -> Dict[str, Any]:
+    if not mlflow_tracker.enabled or not mlflow_tracker.client:
+        return {"enabled": False, "tracking_uri": settings.MLFLOW_TRACKING_URI, "message": "MLflow is disabled"}
+
+    experiment_names = [
+        settings.MLFLOW_EXPERIMENT,
+        settings.MLFLOW_PROMPT_EXPERIMENT,
+    ]
+    experiments = []
+    for name in experiment_names:
+        if not name:
+            continue
+        exp = mlflow_tracker.client.get_experiment_by_name(name)
+        if exp:
+            experiments.append({"id": exp.experiment_id, "name": exp.name})
+
+    if not experiments:
+        return {"enabled": True, "tracking_uri": settings.MLFLOW_TRACKING_URI, "experiments": [], "runs": []}
+
+    runs = []
+    for exp in experiments:
+        found = mlflow_tracker.client.search_runs(
+            experiment_ids=[exp["id"]],
+            max_results=12,
+            order_by=["attributes.start_time DESC"],
+        )
+        for run in found:
+            runs.append({
+                "experiment": exp["name"],
+                "run_name": run.data.tags.get("mlflow.runName", run.info.run_id),
+                "run_id": run.info.run_id,
+                "status": run.info.status,
+                "start_time": int(run.info.start_time or 0),
+                "metrics": dict(run.data.metrics or {}),
+                "params": dict(run.data.params or {}),
+                "tags": dict(run.data.tags or {}),
+            })
+
+    runs.sort(key=lambda x: x["start_time"], reverse=True)
+    runs = runs[:20]
+
+    preferred_cards = [
+        ("Accuracy", ["mean_answer_relevance", "answer_relevance"], "percent"),
+        ("Recall", ["mean_semantic_recall@k", "semantic_recall@k", "recall@k"], "ratio"),
+        ("Faithfulness", ["mean_faithfulness", "faithfulness"], "percent"),
+        ("Relevance", ["mean_context_precision", "semantic_context_precision"], "percent"),
+    ]
+    cards = []
+    for label, candidates, kind in preferred_cards:
+        value = None
+        for run in runs:
+            for key in candidates:
+                if key in run["metrics"]:
+                    value = run["metrics"][key]
+                    break
+            if value is not None:
+                break
+        cards.append({"label": label, "value": _format_metric_value(value, kind), "raw": value})
+
+    line_keys = [
+        ("Answer Relevance", "answer_relevance"),
+        ("Faithfulness", "faithfulness"),
+        ("Semantic Recall", "semantic_recall@k"),
+    ]
+    line_series = []
+    recent_reversed = list(reversed(runs[:8]))
+    for label, key in line_keys:
+        values = []
+        for run in recent_reversed:
+            metric = run["metrics"].get(key)
+            if metric is not None:
+                values.append({"x": run["run_name"][:18], "y": float(metric)})
+        if values:
+            line_series.append({"label": label, "values": values})
+
+    bar_metrics = []
+    aggregate_keys = [
+        ("Added Chunks", "ingest_added_chunks"),
+        ("Added Facts", "ingest_added_facts"),
+        ("Scraped URLs", "scrape_url_count"),
+        ("OCR Pages", "ocr_pages"),
+    ]
+    for label, key in aggregate_keys:
+        value = None
+        for run in runs:
+            if key in run["metrics"]:
+                value = run["metrics"][key]
+                break
+        if value is not None:
+            bar_metrics.append({"label": label, "value": float(value)})
+
+    return {
+        "enabled": True,
+        "tracking_uri": settings.MLFLOW_TRACKING_URI,
+        "experiments": experiments,
+        "cards": cards,
+        "line_series": line_series,
+        "bar_metrics": bar_metrics,
+        "runs": runs[:10],
+    }
 
 
 def _sync_prompt_registry() -> None:
@@ -283,6 +480,12 @@ def ui_workflow():
     return FileResponse(os.path.join(UI_DIR, "workflow.html"))
 
 
+@app.get("/ui/mlflow", include_in_schema=False)
+@app.get("/mlflow_ui", include_in_schema=False)
+def ui_mlflow():
+    return FileResponse(os.path.join(UI_DIR, "mlflow.html"))
+
+
 @app.get("/ui/app.js", include_in_schema=False)
 def ui_app_js():
     return FileResponse(os.path.join(UI_DIR, "app.js"))
@@ -296,6 +499,11 @@ def ui_foruser_js():
 @app.get("/ui/workflow.js", include_in_schema=False)
 def ui_workflow_js():
     return FileResponse(os.path.join(UI_DIR, "workflow.js"))
+
+
+@app.get("/ui/mlflow.js", include_in_schema=False)
+def ui_mlflow_js():
+    return FileResponse(os.path.join(UI_DIR, "mlflow.js"))
 
 
 @app.get("/ui/styles.css", include_in_schema=False)
@@ -351,6 +559,17 @@ def health():
         },
         "output_dirs": {"output_base": settings.OUTPUT_BASE_DIR, "upload_dir": settings.UPLOAD_DIR},
     }
+
+
+@app.get("/documents")
+async def documents():
+    docs = await _collect_documents_summary()
+    return {"status": "ok", "documents": docs, "count": len(docs)}
+
+
+@app.get("/mlflow/summary")
+def mlflow_summary():
+    return {"status": "ok", **_collect_mlflow_summary()}
 
 
 @app.get("/worker/health")
