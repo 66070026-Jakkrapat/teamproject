@@ -19,27 +19,75 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi import Response
-from backend.vision.image_understanding import warmup_blip
 from backend.settings import settings
 from backend.utils.job_manager import (
     new_job, set_stage, log,
     get_status, get_logs, get_workflow_steps
 )
 
-# ✅ แนะนำ: set env Paddle ไว้ตรงนี้ด้วย (กันหลุด)
+# ✅ set env Paddle ไว้ตรงนี้ (กันหลุด)
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "true")
 
-from backend.scraping.web_scraping import run_external_scrape
-from backend.scraping.facebook_scraping import scrape_facebook_post_html
-from backend.vision.image_understanding import caption_images_with_blip_and_translate
-from backend.ocr.ocr_pipeline import process_folder_pdfs
+# --- Core (lightweight) imports ---
 from backend.rag.rag_store import RAGStore, RAGChunk, RAGFact
 from backend.rag.ingest import ingest_main_folder, ingest_text_blob
 from backend.agent.agent_flow import AgenticRAG
 from backend.agent import prompts as agent_prompts
 from backend.report_utils.report import generate_report_md
-from backend.evaluation.eval_runner import run_eval
-from backend.observability.mlflow_tracker import PromptSpec, mlflow_tracker
+
+# --- Heavy imports (may not be available on Vercel) ---
+try:
+    from backend.vision.image_understanding import warmup_blip, caption_images_with_blip_and_translate
+    _VISION_OK = True
+except Exception:
+    _VISION_OK = False
+    def warmup_blip(*a, **kw): pass
+    def caption_images_with_blip_and_translate(*a, **kw): return {}
+
+try:
+    from backend.scraping.web_scraping import run_external_scrape
+    from backend.scraping.facebook_scraping import scrape_facebook_post_html
+    _SCRAPE_OK = True
+except Exception:
+    _SCRAPE_OK = False
+
+try:
+    from backend.ocr.ocr_pipeline import process_folder_pdfs
+    _OCR_OK = True
+except Exception:
+    _OCR_OK = False
+
+try:
+    from backend.evaluation.eval_runner import run_eval
+    _EVAL_OK = True
+except Exception:
+    _EVAL_OK = False
+
+try:
+    from backend.observability.mlflow_tracker import PromptSpec, mlflow_tracker
+    _MLFLOW_OK = True
+except Exception:
+    _MLFLOW_OK = False
+    # Provide a no-op tracker stub
+    class _NoOpTracker:
+        enabled = False
+        client = None
+        def start_run(self, *a, **kw):
+            from contextlib import contextmanager
+            @contextmanager
+            def _noop(): yield
+            return _noop()
+        def log_params(self, *a, **kw): pass
+        def log_metrics(self, *a, **kw): pass
+        def log_dict(self, *a, **kw): pass
+        def log_text(self, *a, **kw): pass
+        def log_artifacts(self, *a, **kw): pass
+        def log_directory(self, *a, **kw): pass
+        def log_prompt_registry(self, *a, **kw): return {}
+        def log_pipeline_snapshot(self, *a, **kw): pass
+    mlflow_tracker = _NoOpTracker()
+    class PromptSpec:
+        def __init__(self, **kw): pass
 
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -407,8 +455,9 @@ async def lifespan(app: FastAPI):
     _sync_prompt_registry()
     if settings.MLFLOW_REGISTER_PIPELINE:
         _register_pipeline_snapshot()
-    # ใน lifespan:
-    warmup_blip(settings.BLIP_MODEL)
+    # Warmup BLIP model (skip on Vercel where vision modules are unavailable)
+    if _VISION_OK:
+        warmup_blip(settings.BLIP_MODEL)
     yield
     # ✅ shutdown (ถ้าจะปิด engine ก็ทำได้ แต่ไม่จำเป็น)
     # await store.engine.dispose()
@@ -769,105 +818,6 @@ def _external_pipeline_thread(job_id: str, keyword: str, amount: int, fixed_sour
     if sys.platform.startswith("win"):
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     return _external_pipeline_impl(job_id, keyword, amount, fixed_sources)
-
-    try:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        source_mode = "fixed_sources" if fixed_sources else "search"
-        set_stage(job_id, "web_scraping", f"Scraping keyword={keyword} amount={amount} mode={source_mode}")
-        log(job_id, "info", "Starting external scrape...")
-        scrape = run_external_scrape(job_id, keyword, max_links=amount, fixed_sources=fixed_sources)
-        main_folder = scrape["main_folder"]
-        items = scrape["items"]
-
-        set_stage(job_id, "data_collecting", "Saved web content/images/pdfs", {"main_folder": main_folder, "items": items})
-        log(job_id, "info", "External scrape complete", {"main_folder": main_folder})
-
-        # captioning per site
-        set_stage(job_id, "captioning", "Captioning images (BLIP + Argos)...")
-        for it in items:
-            site_folder = it["Folder"]
-            content_path = os.path.join(site_folder, "content.txt")
-            ctx = ""
-            if os.path.exists(content_path):
-                ctx = open(content_path, "r", encoding="utf-8", errors="ignore").read()
-
-            images_dir = os.path.join(site_folder, "images")
-            images_meta = os.path.join(images_dir, "images_meta.jsonl")
-            images_under = os.path.join(site_folder, "images_understanding.jsonl")
-
-            # ✅ เพิ่มบรรทัดนี้
-            
-            images_download_meta = os.path.join(images_dir, "images_download_meta.jsonl")
-
-            res = caption_images_with_blip_and_translate(
-                images_dir=images_dir,
-                images_meta_jsonl=images_meta,
-                images_understanding_jsonl=images_under,
-                context_text=ctx,
-                blip_model=settings.BLIP_MODEL,
-                images_download_meta_jsonl=images_download_meta,  # ✅ เพิ่มบรรทัดนี้
-                dedupe=True
-            )
-
-            log(job_id, "info", "Captioned images", {"site_folder": site_folder, **res})
-
-
-        # OCR
-        set_stage(job_id, "ocr", "OCR PDFs (PyMuPDF + PaddleOCR)...")
-        out_root = os.path.join(main_folder, "ocr_results")
-        os.makedirs(out_root, exist_ok=True)
-
-        def pcb(p: dict):
-            if p.get("stage") in ("file_start", "page_done", "file_done", "done"):
-                log(job_id, "info", "OCR progress", p)
-
-        process_folder_pdfs(files_dir=main_folder, out_root=out_root, progress_cb=pcb)
-
-        # Ingest external (✅ FIX: use thread-local store/engine)
-        set_stage(job_id, "ingest_external", "Ingest to External RAG...")
-
-        store_thread = RAGStore(
-            database_url=settings.DATABASE_URL,
-            ollama_host=settings.OLLAMA_HOST,
-            embed_model=settings.EMBED_MODEL,
-            embed_dims=settings.EMBED_DIMS
-        )
-
-        async def _ingest():
-            # กันพลาดกรณี extension/table ยังไม่พร้อม
-            await store_thread.init_db()
-            summary = await ingest_main_folder(store_thread, "external", main_folder)
-            # ปิด engine ใน loop เดียวกัน
-            await store_thread.engine.dispose()
-            return summary
-
-        ingest_summary = run_async_in_new_loop(_ingest())
-        log(job_id, "info", "Ingest external done", ingest_summary)
-
-        report_path = generate_report_md(main_folder, {
-            "job_id": job_id,
-            "keyword": keyword,
-            "namespace": "external",
-            "ingest": ingest_summary
-        })
-        log(job_id, "info", "Generated report.md", {"report_path": report_path})
-
-        set_stage(job_id, "ready", "External pipeline completed ✅", {
-            "main_folder": main_folder,
-            "ingest": ingest_summary,
-            "report_path": report_path
-        })
-
-    except Exception as e:
-        tb = traceback.format_exc()
-        msg = f"Pipeline failed: {type(e).__name__}: {repr(e)}"
-        set_stage(job_id, "error", msg)
-        log(job_id, "error", "Pipeline exception", {"error": repr(e), "type": type(e).__name__, "traceback": tb})
 
 
 @app.post("/pipeline/external/scrape")
