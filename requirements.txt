@@ -1,0 +1,31 @@
+# Web Framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.20
+
+# Database
+sqlalchemy[asyncio]>=2.0.36
+asyncpg>=0.30.0
+pgvector>=0.3.6
+psycopg2-binary>=2.9.10
+
+# Background Tasks
+redis>=5.2.0
+celery>=5.4.0
+
+# Web Scraping
+playwright>=1.49.0
+httpx>=0.28.0
+
+# Thai NLP
+pythainlp>=5.0.0
+
+# ML / Embeddings
+numpy>=1.26.0
+scikit-learn>=1.6.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+aiofiles>=24.1.0

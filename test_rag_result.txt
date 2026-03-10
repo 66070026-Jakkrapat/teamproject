@@ -1,0 +1,15 @@
+============================================================
+Testing full RAG pipeline...
+============================================================
+
+Method: vector
+
+Sources (5):
+  - www.amarintv.com.txt (chunk 13, sim=0.9780513081543246)
+  - www.marketingoops.com.txt (chunk 6, sim=0.9690688438968431)
+  - www.amarintv.com.txt (chunk 0, sim=0.9190031343965754)
+  - www.marketingoops.com.txt (chunk 2, sim=0.8590923741517412)
+  - www.marketingoops.com.txt (chunk 7, sim=0.8403642439554003)
+
+Answer:
+จากเอกสารที่ให้มา ไม่มีข้อมูลที่พูดถึงว่า SME ควรปรับตัวรับมือกับเทรนด์ Pet Parent อย่างไรบ้าง ในเอกสารที่ให้มา มีคำกล่าวถึงเทรนด์สําคัญในปี 2025 แต่ไม่มีข้อมูลเกี่ยวกับเทรนด์ Pet Parent

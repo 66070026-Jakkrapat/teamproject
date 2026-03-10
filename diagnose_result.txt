@@ -1,0 +1,31 @@
+=== DOCUMENTS IN DB ===
+  ID=1 | www.ttbbank.com.txt | status=completed | text_len=5000
+  ID=2 | www.amarintv.com.txt | status=completed | text_len=3041
+  ID=3 | www.marketingoops.com.txt | status=completed | text_len=4999
+
+=== CHUNKS PER DOCUMENT ===
+  doc_id=3 | total_chunks=10 | with_embedding=10
+  doc_id=2 | total_chunks=14 | with_embedding=14
+  doc_id=1 | total_chunks=8 | with_embedding=8
+
+=== VECTOR SEARCH: Pet Parent ===
+
+--- Result 1 (sim=0.9781) ---
+  File: www.amarintv.com.txt | Chunk: 13
+  Text (first 300 chars): ปี 2025 จะเป็นปีแห่งการปรับตัวในทุกมิติอย่างรวดเร็วกว่าที่เคย ผู้ประกอบการ SME ต้องเตรียมพร้อมรับมือกับทุก ๆ การเปลี่ยนแปลง และนําเทรนด์เหล่านี้ไปใช้เพื่อสร้างความได้เปรียบในธุรกิจได้
+
+--- Result 2 (sim=0.9691) ---
+  File: www.marketingoops.com.txt | Chunk: 6
+  Text (first 300 chars): ในปี 2025 ธุรกิจจะต้องเน้นไปที่การลด Life Cycle ของผลิตภัณฑ์และบริการ ขณะเดียวกันก็ให้ความสําคัญกับการลดการบริโภคเป็นอันดับแรก ดังนั้นเราจะได้เห็นความร่วมมือกันของทุกภาคส่วนตลอดทั้งห่วงโซ่คุณค่า ไม่ว่าจะเป็นผู้บริโภค หน่วยงานกํากับดูแล นักวิจัย ธุรกิจรีไซเคิล ซัพพลายเออร์ และบริษัทเทคโนโลยีต่างๆ เพื
+
+--- Result 3 (sim=0.9190) ---
+  File: www.amarintv.com.txt | Chunk: 0
+  Text (first 300 chars): ปี 2025 SME ต้องจับตา 5 เทรนด์สําคัญ: การเติบโตของตลาดสัตว์เลี้ยง, การดูแลผู้สูงอายุ, พลังงานสะอาด, AI และระบบอัตโนมัติ, และการค้าออนไลน์ไร้เงินสด เพื่อปรับตัวและคว้าโอกาสธุรกิจในยุคใหม่ ปี 2025 ถือเป็นอีกหนึ่งปีที่ธุรกิจต้องเผชิญกับความเปลี่ยนแปลงอย่างรวดเร็ว ผู้ประกอบการ SME จําเป็นต้องเตรียมตัวให
+
+--- Result 4 (sim=0.8591) ---
+  File: www.marketingoops.com.txt | Chunk: 2
+  Text (first 300 chars): 1. Gen AI Merges with Hyperautomation ในปี 2024 “Generative AI” “Gen AI” เข้ามามีบทบาทในชีวิตผู้คนมากขึ้น ซึ่งในปี 2025 นี้ Gen AI จะเริ่มเข้ามามีบทบาทต่อการทํางานของธุรกิจมากขึ้นเช่นกันเพื่อเพิ่มประสิทธิภาพการทํางานของธุรกิจให้หลากหลายสอดรับความต้องการ และเพื่อให้ธุรกิจสามารถทํางานได้อย่างอิสระ แต่
+
+--- Result 5 (sim=0.8404) ---
+  File: www.marketingoops.com.txt | Chunk: 7
+  Text (first 300 chars): 3. The AI Revolution in Customer Experience ในปี 2025 เทรนด์ยักษ์ใหญ่อย่าง AI ก็ส่งผลต่อเรื่อง ประสบการณ์ลูกค้า (Customer Experience) หรือ CX เช่นกัน ในมุมของธุรกิจ การมี AI เข้ามามีบทบาทนั้นทําให้การสร้างประสบการณ์ที่ดีให้กับลูกค้าดูเหมือนจะเป็นเรื่องง่ายขึ้น แต่ขณะเดียวกันในฝั่งผู้บริโภคก็คาดหวังว
