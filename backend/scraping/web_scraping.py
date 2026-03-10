@@ -1009,16 +1009,21 @@ def scrape_single_url(
 # ============================================================
 # Main entry
 # ============================================================
-def run_external_scrape(job_id: str, keyword: str, max_links: int = 5) -> Dict[str, Any]:
+def run_external_scrape(job_id: str, keyword: str, max_links: int = 5, fixed_sources: List[str] | None = None) -> Dict[str, Any]:
     ts = time.strftime("%Y%m%d_%H%M%S")
     safe_kw = re.sub(r"[^a-zA-Z0-9ก-๙_]+", "_", keyword)[:40]
     main_folder = os.path.join(settings.OUTPUT_BASE_DIR, f"data_{safe_kw}_{ts}")
     safe_mkdir(main_folder)
     collected: List[Dict[str, Any]] = []
+    fixed_sources = [u.strip() for u in (fixed_sources or []) if (u or "").strip()]
 
     pw = PlaywrightSession(job_id).start()
     try:
-        targets = google_search_targets(job_id, pw.page, keyword, max_links=max_links)
+        if fixed_sources:
+            targets = [{"url": u, "title": ""} for u in fixed_sources]
+            log(job_id, "info", f"Using fixed sources => {len(targets)}", {"urls": [t['url'] for t in targets]})
+        else:
+            targets = google_search_targets(job_id, pw.page, keyword, max_links=max_links)
         log(job_id, "info", f"Search URLs => {len(targets)}", {"urls": [t['url'] for t in targets]})
 
         for idx, t in enumerate(targets, start=1):
@@ -1031,7 +1036,7 @@ def run_external_scrape(job_id: str, keyword: str, max_links: int = 5) -> Dict[s
                     pw_page=pw.page, pw_context=pw.context,
                     max_images=None, max_files=30,
                 )
-                res.update({"Source": "google", "rank": idx, "search_title": t.get("title", "")})
+                res.update({"Source": "fixed" if fixed_sources else "google", "rank": idx, "search_title": t.get("title", "")})
                 collected.append(res)
             except Exception as e:
                 log(job_id, "error", f"Failed to scrape {u}: {e}", {"traceback": traceback.format_exc()})

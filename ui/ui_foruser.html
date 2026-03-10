@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>UI_FORUSER</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    :root {
+      --bg: #eef5ff;
+      --bg-2: #dfeeff;
+      --panel: rgba(255, 255, 255, 0.92);
+      --panel-strong: rgba(255, 255, 255, 0.98);
+      --line: rgba(26, 73, 135, 0.10);
+      --line-strong: rgba(26, 73, 135, 0.18);
+      --text: #142033;
+      --muted: #65748c;
+      --blue: #1967d2;
+      --blue-2: #0e4fa8;
+      --sky: #eff6ff;
+      --sky-2: #dbeaff;
+      --warn: #9a5a22;
+      --shadow: 0 22px 50px rgba(24, 63, 120, 0.12);
+      --radius-2xl: 30px;
+      --radius-xl: 22px;
+      --radius-lg: 18px;
+      --radius-md: 14px;
+      --sans: "Sarabun", "Noto Sans Thai", system-ui, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+
+    html, body { min-height: 100%; }
+
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--text);
+      background:
+        radial-gradient(circle at top right, rgba(25, 103, 210, 0.12), transparent 24%),
+        radial-gradient(circle at top left, rgba(81, 147, 255, 0.10), transparent 24%),
+        linear-gradient(180deg, #f5faff 0%, var(--bg) 45%, var(--bg-2) 100%);
+    }
+
+    .page {
+      width: min(1180px, calc(100% - 24px));
+      margin: 18px auto 30px;
+    }
+
+    .shell {
+      border-radius: var(--radius-2xl);
+      border: 1px solid rgba(255,255,255,0.68);
+      background: linear-gradient(180deg, rgba(255,255,255,0.78), rgba(248,251,255,0.94));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(16px);
+      overflow: hidden;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 20px 22px 14px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand__mark {
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      background:
+        radial-gradient(circle at 32% 28%, rgba(255,255,255,0.62), transparent 32%),
+        linear-gradient(135deg, var(--blue), #5a9dff);
+      box-shadow: 0 12px 26px rgba(25, 103, 210, 0.22);
+      flex: 0 0 auto;
+    }
+
+    .brand__title {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+    }
+
+    .brand__sub {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .topbar__status {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.86);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .hero {
+      padding: 0 22px 18px;
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+      font-weight: 800;
+      max-width: 880px;
+    }
+
+    .hero p {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.8;
+      max-width: 760px;
+    }
+
+    .content {
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr);
+      gap: 18px;
+      padding: 0 22px 22px;
+      align-items: start;
+    }
+
+    .sidebar {
+      display: grid;
+      gap: 14px;
+    }
+
+    .panel {
+      border-radius: var(--radius-xl);
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: 0 10px 28px rgba(24, 63, 120, 0.05);
+    }
+
+    .panel--side {
+      padding: 16px;
+    }
+
+    .panel--main {
+      padding: 18px;
+      background: var(--panel-strong);
+    }
+
+    .panel-title {
+      margin: 0 0 6px;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .panel-sub {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .starter-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .starter {
+      width: 100%;
+      text-align: left;
+      padding: 14px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: #fff;
+      cursor: pointer;
+      font: inherit;
+      color: var(--text);
+    }
+
+    .starter__title {
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .starter__meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .workspace {
+      display: grid;
+      gap: 14px;
+    }
+
+    .notice {
+      display: none;
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(154, 90, 34, 0.16);
+      background: rgba(154, 90, 34, 0.08);
+      color: var(--warn);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .notice[data-visible="true"] {
+      display: block;
+    }
+
+    .question-card,
+    .answer-card {
+      border-radius: var(--radius-xl);
+      border: 1px solid var(--line);
+      background: var(--panel-strong);
+      padding: 18px;
+    }
+
+    .question-card {
+      background: linear-gradient(180deg, #ffffff, #f8fbff);
+    }
+
+    .question-label,
+    .answer-label {
+      margin-bottom: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .question-preview,
+    .answer-body {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--sans);
+      line-height: 1.9;
+      color: var(--text);
+    }
+
+    .question-preview {
+      font-size: 16px;
+    }
+
+    .answer-body {
+      font-size: 16px;
+      min-height: 260px;
+    }
+
+    .composer {
+      border-radius: var(--radius-xl);
+      border: 1px solid var(--line-strong);
+      background: linear-gradient(180deg, #ffffff, #f8fbff);
+      padding: 16px;
+    }
+
+    .composer__top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .composer__hint {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .composer__meta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .meta-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--sky);
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .meta-pill input {
+      width: 64px;
+      padding: 6px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      text-align: center;
+    }
+
+    .composer__input {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+    }
+
+    .prompt-wrap {
+      position: relative;
+    }
+
+    .prompt {
+      width: 100%;
+      min-height: 100px;
+      resize: vertical;
+      padding: 14px 16px 42px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+      font-size: 15px;
+      line-height: 1.8;
+      outline: none;
+    }
+
+    .prompt:focus {
+      border-color: rgba(25, 103, 210, 0.24);
+      box-shadow: 0 0 0 4px rgba(25, 103, 210, 0.07);
+    }
+
+    .prompt__meta {
+      position: absolute;
+      left: 14px;
+      right: 14px;
+      bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 11px;
+      pointer-events: none;
+    }
+
+    .send-btn {
+      border: 0;
+      border-radius: 18px;
+      padding: 0 18px;
+      min-width: 118px;
+      height: 100px;
+      background: linear-gradient(135deg, var(--blue), var(--blue-2));
+      color: #fff;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 16px 34px rgba(25, 103, 210, 0.18);
+    }
+
+    .send-btn:disabled {
+      opacity: 0.72;
+      cursor: wait;
+      box-shadow: none;
+    }
+
+    .sources-drawer {
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.84);
+      overflow: hidden;
+    }
+
+    .sources-drawer summary {
+      list-style: none;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .sources-drawer summary::-webkit-details-marker { display: none; }
+
+    .sources-inner {
+      padding: 0 14px 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .source {
+      padding: 14px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .source__title {
+      margin: 0 0 6px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .source__meta {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .source__preview {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--sans);
+      font-size: 13px;
+      line-height: 1.7;
+      color: #2c3a4e;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.75;
+    }
+
+    .count {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--sky);
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .footer {
+      padding: 0 22px 22px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .mono { font-family: var(--mono); }
+
+    @media (max-width: 980px) {
+      .page {
+        width: min(100% - 12px, 1180px);
+      }
+
+      .content,
+      .composer__input {
+        grid-template-columns: 1fr;
+      }
+
+      .send-btn {
+        width: 100%;
+        height: 56px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand__mark" aria-hidden="true"></div>
+          <div>
+            <div class="brand__title">Ask AI</div>
+            <div class="brand__sub">Thai Business Insight · Blue Edition</div>
+          </div>
+        </div>
+        <div class="topbar__status">
+          <div class="pill" id="routePill">Route: waiting</div>
+          <div class="pill" id="statusPill">Ready</div>
+        </div>
+      </header>
+
+      <section class="hero">
+        <h1>Ask in Thai or English. อ่านคำตอบง่าย และเปิดดู sources เองเมื่อจำเป็น</h1>
+        <p>คำถามอยู่ด้านบน คำตอบอยู่ด้านล่าง และแหล่งอ้างอิงถูกซ่อนไว้ก่อนเพื่อให้หน้าใช้งานสะอาดขึ้น</p>
+      </section>
+
+      <section class="content">
+        <aside class="sidebar">
+          <section class="panel panel--side">
+            <h2 class="panel-title">Starter Questions</h2>
+            <p class="panel-sub">เลือกคำถามเริ่มต้นพร้อมดูว่า keyword และ source อ้างอิงมาจากอะไร</p>
+            <div class="starter-list">
+              <button class="starter" type="button" data-question="บทความนี้สรุป 5 เทรนด์ธุรกิจปี 2025 สำหรับ SME มีอะไรบ้าง? ตอบเป็นรายการ 1–5 พร้อมคำอธิบายสั้น ๆ">
+                <div class="starter__title">5 SME trends in 2025</div>
+                <div class="starter__meta">Keyword: เทรนด์ธุรกิจ SME 2025<br>Source: ttb article</div>
+              </button>
+              <button class="starter" type="button" data-question="สรุปเทรนด์ธุรกิจไทยที่สำคัญจากข้อมูลที่ ingest ไว้ พร้อมบอกแหล่งอ้างอิงหลัก">
+                <div class="starter__title">Thai business trends summary</div>
+                <div class="starter__meta">Keyword: เทรนด์ธุรกิจไทย<br>Source: ingested web pages</div>
+              </button>
+              <button class="starter" type="button" data-question="Compare internal and external insights related to business customers and summarize the main differences.">
+                <div class="starter__title">Compare insights</div>
+                <div class="starter__meta">Keyword: business customers<br>Source: internal + external RAG</div>
+              </button>
+            </div>
+          </section>
+        </aside>
+
+        <section class="workspace">
+          <div id="notice" class="notice" data-visible="false"></div>
+
+          <section class="question-card">
+            <div class="question-label">Question · คำถาม</div>
+            <pre id="questionPreview" class="question-preview">No question yet</pre>
+          </section>
+
+          <section class="answer-card">
+            <div class="answer-label">Answer · คำตอบ</div>
+            <pre id="answer" class="answer-body">Your answer will appear here.
+
+คำตอบจะแสดงที่นี่หลังจากส่งคำถาม</pre>
+          </section>
+
+          <form id="askForm" class="composer">
+            <div class="composer__top">
+              <div class="composer__hint">Thai / English supported</div>
+              <div class="composer__meta">
+                <label class="meta-pill">
+                  <span>Top K</span>
+                  <input id="topk" type="number" min="3" max="30" value="8" />
+                </label>
+                <div class="meta-pill">Ctrl/Cmd + Enter</div>
+              </div>
+            </div>
+
+            <div class="composer__input">
+              <div class="prompt-wrap">
+                <textarea id="q" class="prompt" placeholder="Ask in Thai or English...&#10;&#10;ตัวอย่าง: บทความนี้สรุป 5 เทรนด์ธุรกิจปี 2025 สำหรับ SME มีอะไรบ้าง? ตอบเป็นรายการ 1–5 พร้อมคำอธิบายสั้น ๆ"></textarea>
+                <div class="prompt__meta">
+                  <span id="promptHint">Ask clearly for a better answer</span>
+                  <span id="charCount">0 chars</span>
+                </div>
+              </div>
+              <button id="btnAsk" class="send-btn" type="submit">Send</button>
+            </div>
+          </form>
+
+          <details class="sources-drawer" id="sourcesDrawer">
+            <summary>
+              <span>Sources · แหล่งอ้างอิง</span>
+              <span id="sourceCount" class="count">0 chunks</span>
+            </summary>
+            <div id="sources" class="sources-inner">
+              <div class="empty">Relevant chunks, URLs, scores, and retrieval modes will appear here.</div>
+            </div>
+          </details>
+        </section>
+      </section>
+
+      <div class="footer">
+        UI path: <span class="mono">/UI_FORUSER</span>
+      </div>
+    </section>
+  </main>
+
+  <script src="/ui/app_foruser.js"></script>
+</body>
+</html>

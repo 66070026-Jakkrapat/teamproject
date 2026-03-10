@@ -1,0 +1,70 @@
+Hybrid Deployment Guide
+Vercel + Local Worker Machine
+
+Overview
+- Public layer: Vercel serves the web UI and lightweight API endpoints
+- Worker layer: this machine runs heavy jobs such as scraping, OCR, ingest, Ollama, and optional MLflow
+- Shared services: Postgres/pgvector, object storage, and optionally a remote MLflow tracking server
+
+Recommended architecture
+1. End user opens the app on Vercel
+2. Vercel receives a request for heavy work such as external scraping or PDF ingestion
+3. If `HYBRID_WORKER_ENABLED=true`, the app proxies that request to this machine
+4. This machine processes the job locally and stores outputs in database/filesystem/shared storage
+5. Vercel polls job status and logs from this machine using the prefixed remote job id
+6. Once ingestion is complete, the user can ask questions from the public UI and read answers from the shared knowledge base
+
+What was implemented
+- Worker authentication with `X-Worker-Secret`
+- Worker health endpoint: `/worker/health`
+- Worker scrape endpoint: `/worker/pipeline/external/scrape`
+- Worker PDF ingest endpoint: `/worker/pipeline/internal/upload_pdf`
+- Public app can proxy:
+  - `/pipeline/external/scrape`
+  - `/pipeline/internal/upload_pdf`
+  - `/jobs/{job_id}/status`
+  - `/jobs/{job_id}/logs`
+- Remote jobs are returned as `remote:<job_id>`
+
+Environment variables
+- On Vercel/public app:
+  - `HYBRID_WORKER_ENABLED=true`
+  - `WORKER_BASE_URL=https://your-worker-host`
+  - `WORKER_SHARED_SECRET=your-strong-secret`
+  - `WORKER_TIMEOUT_SEC=180`
+- On worker machine:
+  - `HYBRID_WORKER_ENABLED=false`
+  - `WORKER_SHARED_SECRET=your-strong-secret`
+  - database/Ollama/MLflow variables should point to services reachable by the worker
+
+Important note
+- Do not enable `HYBRID_WORKER_ENABLED=true` on both Vercel and the worker machine at the same time
+- The worker should execute jobs locally, not proxy them again
+
+Network options for exposing the worker
+- Reverse proxy with domain and HTTPS
+- Cloudflare Tunnel
+- Tailscale Funnel / VPN + private networking
+- ngrok for short-term testing only
+
+Security recommendations
+- Always set `WORKER_SHARED_SECRET`
+- Put the worker behind HTTPS
+- Restrict allowed origins/IPs if possible
+- Separate worker host from public app host
+
+Current heavy tasks suitable for the worker
+- External web scraping
+- PDF OCR
+- Image captioning
+- RAG ingestion
+- Ollama inference/embeddings
+- MLflow tracking server
+
+Tasks that can stay on Vercel
+- UI_FORUSER
+- lightweight ask/query endpoints if they only read from external services
+- job creation and status polling
+
+Suggested next step
+- Move output files from local filesystem to shared object storage so Vercel and worker can reference the same artifacts consistently

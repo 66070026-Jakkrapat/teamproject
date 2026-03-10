@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import hashlib
 import asyncio
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -115,6 +116,119 @@ class RAGStore:
         self.embedder = OllamaEmbedder(host=ollama_host, model=embed_model)
         self.embed_dims = embed_dims
 
+    def _zero_embedding(self) -> List[float]:
+        return [0.0] * int(self.embed_dims)
+
+    @staticmethod
+    def _normalize_ws(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "")).strip()
+
+    @staticmethod
+    def _tokenize_search_terms(text: str) -> List[str]:
+        raw = re.findall(r"[\w\u0E00-\u0E7F]{2,}", (text or "").lower(), flags=re.UNICODE)
+        seen = set()
+        out: List[str] = []
+        stopwords = {
+            "และ", "หรือ", "ของ", "ที่", "ใน", "จาก", "กับ", "เป็น", "ให้", "ได้", "มาก", "แล้ว",
+            "what", "when", "where", "which", "with", "have", "this", "that", "จาก", "ค่ะ", "ครับ",
+        }
+        for token in raw:
+            if token in stopwords or token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+        return out
+
+    def _fallback_chunk_by_size(self, text: str, target_chars: int = 900, min_chunk_chars: int = 100) -> List[str]:
+        sentences = self._split_sentences(text)
+        if not sentences:
+            cleaned = self._normalize_ws(text)
+            return [cleaned] if len(cleaned) >= min_chunk_chars else []
+
+        chunks: List[str] = []
+        current: List[str] = []
+        current_len = 0
+        for sentence in sentences:
+            s = self._normalize_ws(sentence)
+            if not s:
+                continue
+            projected = current_len + len(s) + (1 if current else 0)
+            if current and projected > target_chars:
+                chunk = " ".join(current).strip()
+                if chunk:
+                    chunks.append(chunk)
+                current = [s]
+                current_len = len(s)
+            else:
+                current.append(s)
+                current_len = projected
+
+        if current:
+            chunk = " ".join(current).strip()
+            if chunk:
+                chunks.append(chunk)
+
+        merged: List[str] = []
+        for chunk in chunks:
+            if merged and len(chunk) < min_chunk_chars:
+                merged[-1] = (merged[-1] + " " + chunk).strip()
+            else:
+                merged.append(chunk)
+        return merged
+
+    @staticmethod
+    def _lexical_score(question_tokens: List[str], text: str) -> float:
+        hay = (text or "").lower()
+        if not hay:
+            return 0.0
+        score = 0.0
+        for token in question_tokens:
+            count = hay.count(token)
+            if count:
+                score += min(3.0, 1.0 + math.log1p(count))
+        if question_tokens:
+            coverage = sum(1 for token in question_tokens if token in hay) / len(question_tokens)
+            score += coverage * 3.0
+        return score
+
+    async def _query_lexical(self, namespace: str, question: str, top_k: int, min_score: float) -> List[RetrievedChunk]:
+        tokens = self._tokenize_search_terms(question)
+        async with self.SessionLocal() as db:
+            stmt = (
+                select(RAGChunk)
+                .where(RAGChunk.namespace == namespace)
+                .order_by(RAGChunk.source_path, RAGChunk.page, RAGChunk.chunk_index)
+                .limit(max(top_k * 40, 200))
+            )
+            res = await db.execute(stmt)
+            rows = [r[0] for r in res.all()]
+
+        scored: List[RetrievedChunk] = []
+        for ch in rows:
+            score = self._lexical_score(tokens, ch.text or "")
+            if score < min_score:
+                continue
+            scored.append(RetrievedChunk(
+                text=ch.text or "",
+                score=score,
+                meta={
+                    "namespace": ch.namespace,
+                    "source_type": ch.source_type,
+                    "source_url": ch.source_url,
+                    "source_path": ch.source_path,
+                    "page": ch.page,
+                    "chunk_index": ch.chunk_index,
+                    "chunk_total": ch.chunk_total,
+                    "score": score,
+                    "retrieval_mode": "lexical_fallback",
+                    "text_preview": (ch.text or "")[:360],
+                    "warning": f"Semantic embeddings unavailable for query; used lexical fallback on stored chunks in namespace '{namespace}'.",
+                }
+            ))
+
+        scored.sort(key=lambda x: (-float(x.score or 0.0), x.meta.get("source_path", ""), x.meta.get("chunk_index", 0)))
+        return scored[:top_k]
+
     async def init_db(self) -> None:
         async with self.engine.begin() as conn:
             await conn.execute(sql_text("CREATE EXTENSION IF NOT EXISTS vector;"))
@@ -186,7 +300,10 @@ class RAGStore:
             return [s for s in sentences if len(s) >= min_chunk_chars]
 
         # embed ทุกประโยคพร้อมกัน (ใช้ embed_many เพื่อ concurrency)
-        embeddings = await self.embedder.embed_many(sentences)
+        try:
+            embeddings = await self.embedder.embed_many(sentences)
+        except Exception:
+            return self._fallback_chunk_by_size(text, min_chunk_chars=min_chunk_chars)
 
         # วน compare similarity ระหว่างประโยคติดกัน
         chunks: List[str] = []
@@ -229,7 +346,12 @@ class RAGStore:
         if not chunks:
             return 0
 
-        embs = await self.embedder.embed_many(chunks)
+        embedding_warning = ""
+        try:
+            embs = await self.embedder.embed_many(chunks)
+        except Exception as e:
+            embs = [self._zero_embedding() for _ in chunks]
+            embedding_warning = str(e)
         rows = []
         for t, m, e in zip(chunks, metas, embs):
             source_key = (
@@ -248,7 +370,7 @@ class RAGStore:
                 "chunk_total": int(m.get("chunk_total") or 1),
                 "text": t,
                 "embedding": e,
-                "score_hint": float(m.get("relevance_score") or 0.0),
+                "score_hint": float(m.get("relevance_score") or 0.0) if not embedding_warning else -1.0,
             })
 
         async with self.SessionLocal() as db:
@@ -452,18 +574,23 @@ class RAGStore:
             top_k: จำนวน chunks สูงสุดที่จะ return (default 15)
             min_score: ตัด chunk ที่ score ต่ำกว่านี้ทิ้ง
         """
-        q_emb = await self.embedder.embed_one(question)
+        try:
+            q_emb = await self.embedder.embed_one(question)
+        except Exception:
+            return await self._query_lexical(namespace, question, top_k=top_k, min_score=min_score)
         dist_expr = RAGChunk.embedding.l2_distance(q_emb)
 
         async with self.SessionLocal() as db:
             stmt = (
                 select(RAGChunk, dist_expr.label("dist"))
-                .where(RAGChunk.namespace == namespace)
+                .where(RAGChunk.namespace == namespace, RAGChunk.score_hint >= 0.0)
                 .order_by(dist_expr)
                 .limit(top_k)
             )
             res = await db.execute(stmt)
             rows = res.all()
+        if not rows:
+            return await self._query_lexical(namespace, question, top_k=top_k, min_score=min_score)
 
         out: List[RetrievedChunk] = []
         for row in rows:
@@ -486,6 +613,8 @@ class RAGStore:
                     "chunk_index": ch.chunk_index,
                     "chunk_total": ch.chunk_total,
                     "score": score,
+                    "retrieval_mode": "semantic",
+                    "text_preview": (ch.text or "")[:360],
                 }
             ))
 
@@ -540,6 +669,7 @@ class RAGStore:
                     "chunk_index": c.chunk_index,
                     "chunk_total": c.chunk_total,
                     "score": float(c.score_hint or 0.0),
+                    "text_preview": (c.text or "")[:360],
                 },
             )
             for c in rows

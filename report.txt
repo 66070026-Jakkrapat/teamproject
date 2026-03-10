@@ -1,0 +1,96 @@
+Thai Business Insight AI
+Report Writing Prompt Pack
+
+1. แนวทาง deploy ที่แนะนำ
+- Vercel ใช้เป็น public layer สำหรับหน้าเว็บและ lightweight API
+- เครื่องนี้ใช้เป็น background worker/server สำหรับ scraping, OCR, image captioning, ingest, model-adjacent tasks, และ scheduled jobs
+- วิธีทำงานจริงที่เหมาะสมคือ:
+  - ผู้ใช้เข้าเว็บผ่าน Vercel
+  - Vercel ส่ง job/request ไปยัง worker machine หรือ job queue
+  - worker machine scrape/OCR/ingest เสร็จแล้วบันทึกผลลง database/object storage
+  - Vercel อ่านผลลัพธ์จากฐานข้อมูลเดียวกันเพื่อให้ผู้ใช้ถามตอบต่อได้
+- หากต้อง production จริง ควรแยกบริการอย่างชัดเจน:
+  - frontend/app layer
+  - API layer
+  - worker layer
+  - database/vector database
+  - optional MLflow server
+
+2. สรุปสิ่งที่ถูกพัฒนา/แก้ไขแล้วในโปรเจค
+- เพิ่มหน้า `UI_FORUSER` สำหรับ end user และยังเก็บ `/ui` เดิมไว้สำหรับ workflow/dev
+- ปรับ UI ให้โฟกัสกับคำถาม คำตอบ และหลักฐานอ้างอิงที่เปิดดูเพิ่มได้
+- ซ่อน sources ไว้ด้านล่างเพื่อไม่ให้รบกวนการอ่าน
+- เพิ่ม starter question buttons เพื่อช่วย onboarding ผู้ใช้
+- เพิ่ม fixed sources mode สำหรับ scrape จาก URL ที่ระบุเอง
+- ปรับระบบ RAG ให้ทนต่อปัญหา embeddings ล้ม โดย fallback ไป lexical retrieval ได้
+- ทำให้ ingest เก็บข้อมูลและ metadata ได้แม้ embedding service error
+- ปรับ parsing ของบทความประเภทลิสต์/numbered sections ให้ตอบครบขึ้น
+- เพิ่ม MLflow settings และ tracker abstraction
+- เพิ่ม evaluation runner สำหรับวัด semantic retrieval, structured retrieval, และ answer quality
+- เพิ่ม prompt registry sync และ pipeline snapshot
+- เพิ่ม deploy entrypoint สำหรับ Vercel
+
+3. Prompt สำหรับให้ AI เขียนรายงาน
+คัดลอก prompt ด้านล่างไปใช้ได้ทันที
+
+เขียนรายงานภาษาไทยแบบมืออาชีพสำหรับโปรเจค "Thai Business Insight AI" โดยให้สำนวนเป็นเชิงวิชาการกึ่งธุรกิจ อ่านง่าย แต่มี technical depth พอสำหรับกรรมการหรือผู้ประเมินโครงการ AI/Product/Innovation
+
+บริบทของระบบ:
+- ระบบเป็น AI Business Research Agent สำหรับรวบรวมและวิเคราะห์ข้อมูลธุรกิจจากเว็บไซต์และเอกสาร
+- pipeline หลักประกอบด้วย web scraping, image captioning, OCR, ingestion เข้า semantic และ structured RAG, จากนั้นใช้ agent ตอบคำถามจาก knowledge base
+- มี user interface สำหรับ end user ชื่อ UI_FORUSER ที่ออกแบบให้ถามคำถามได้อย่างง่ายและแสดงคำตอบพร้อมหลักฐานอ้างอิง
+- มี fallback lexical retrieval เมื่อ semantic embeddings ใช้งานไม่ได้
+- มี MLflow สำหรับ data ingestion tracking, RAG evaluation, prompt management, และ pipeline snapshot
+- แนวทาง deployment ที่เหมาะสมคือ hybrid deployment: ใช้ Vercel เป็น frontend/public API layer และใช้ local worker machine หรือ dedicated worker server สำหรับงานหนัก เช่น scrape, OCR, ingest
+
+สิ่งที่พัฒนาแล้วจริง:
+- UI_FORUSER แยกจาก UI เดิม
+- หน้า user โทน minimal blue-white และใช้งานง่าย
+- เพิ่ม starter prompts
+- ปรับ answer pipeline ให้ไม่ล่มเมื่อ embeddings มีปัญหา
+- เพิ่ม semantic-to-lexical fallback
+- ทำให้ ingest เก็บข้อมูลได้แม้ embedding error
+- เพิ่ม fixed source scraping mode
+- เพิ่ม MLflow observability และ RAG evaluation
+- เพิ่ม Vercel deployment scaffold
+
+ให้เขียนรายงานตามโครงนี้ประมาณ 20 หน้า:
+1. Executive Summary: 1 หน้า
+2. Problem Statement: 2 หน้า
+3. Solution: 2-3 หน้า
+4. Target Users: 1-2 หน้า
+5. System Architecture: 3-4 หน้า
+6. Implementation: 4-5 หน้า
+7. Results & Evaluation: 2-3 หน้า
+8. Impact & Sustainability: 1-2 หน้า
+9. Team & Contributions: 1 หน้า
+10. Conclusion & Future Work: 1 หน้า
+References & Appendix: ต่อท้าย
+
+ข้อกำหนดการเขียน:
+- เขียนให้มีหัวข้อย่อยครบทุก section
+- ในแต่ละ section ให้มี:
+  - วัตถุประสงค์
+  - เนื้อหาเชิงวิเคราะห์
+  - รายละเอียดเชิงเทคนิคเมื่อเกี่ยวข้อง
+  - ข้อสรุปของ section
+- อย่าเขียนกว้างเกินไป ให้เชื่อมกับระบบนี้จริง
+- อธิบายทั้ง business value และ technical architecture
+- ใส่ส่วนอธิบาย hybrid deployment model ว่าทำไม Vercel ไม่ควรรันงาน scrape/OCR/Ollama/MLflow local โดยตรง
+- ใส่ metrics ที่ควรใช้ประเมิน เช่น precision@k, recall@k, context precision, answer relevance, faithfulness, latency, ingestion robustness
+- อธิบาย MLflow แยกเป็น 4 ส่วน:
+  - Data Ingestion Tracking
+  - RAG Evaluation
+  - Prompt & Agent Management
+  - Model/Pipeline Registry
+- อธิบายข้อจำกัดของระบบปัจจุบันและแผนพัฒนาต่อ
+- ให้มีส่วน references และ appendix ที่สมเหตุสมผล
+- เขียนผลลัพธ์ออกมาในรูปแบบที่พร้อมนำไปจัดหน้าเป็นรายงานได้ทันที
+
+4. Prompt เสริมสำหรับ version ที่เป็นทางการมากขึ้น
+ช่วย rewrite รายงานฉบับเดิมให้อยู่ในโทน formal academic report มากขึ้น โดย:
+- เพิ่มความเป็นทางการของภาษา
+- รักษาความชัดเจนของ technical details
+- เพิ่ม transition ระหว่าง sections
+- ลดภาษาการตลาดที่เกินจำเป็น
+- ทำให้เหมาะกับการส่งอาจารย์หรือกรรมการประกวด

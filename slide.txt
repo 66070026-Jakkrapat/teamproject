@@ -1,0 +1,83 @@
+Thai Business Insight AI
+Slide Presentation Prompt Pack
+
+1. แนวทาง deploy ที่แนะนำ
+- ใช้ Vercel เป็น public web/app layer สำหรับหน้า UI_FORUSER และ API เบา ๆ
+- ใช้เครื่องนี้เป็น worker/server ภายในสำหรับงานหนัก ได้แก่ scraping, image captioning, OCR, ingest, และ jobs ที่ใช้เวลานาน
+- ให้ Vercel เรียก API หรือ webhook มายังเครื่องนี้ หรือให้เครื่องนี้ push ผลลัพธ์เข้า database/shared storage ที่ Vercel อ่านได้
+- ไม่แนะนำให้รัน scraping/OCR/Ollama/MLflow local บน Vercel โดยตรง เพราะ Vercel เป็น serverless และไม่เหมาะกับงาน stateful/long-running
+
+2. สรุปสิ่งที่ถูกพัฒนา/แก้ไขแล้วในระบบ
+- เพิ่มหน้า `UI_FORUSER` แยกจาก `/ui` เดิม โดยเก็บหน้า dev/console เดิมไว้
+- ปรับ `UI_FORUSER` ให้เป็นหน้าใช้งานจริงสำหรับ end user ในโทนฟ้า-ขาว, โครงแบบถามคำถามด้านบน คำตอบด้านล่าง และซ่อน sources ไว้ให้เปิดเอง
+- เพิ่ม starter questions ในหน้า user เพื่อให้ผู้ใช้เริ่มถามได้เร็วขึ้น
+- แก้ backend `/ask` ให้ไม่ล้มง่ายเมื่อ embedding จาก Ollama มีปัญหา
+- เพิ่ม fallback จาก semantic retrieval ไป lexical retrieval เพื่อให้ถามตอบต่อได้แม้ embedding service ล่ม
+- ปรับ ingest ให้เก็บ chunks และ metadata ได้แม้ embedding generation ล้ม
+- ปรับ parser/agent flow ให้จับคำตอบแบบรายการ numbered sections ได้ครบขึ้น เช่นเคส 5 เทรนด์ธุรกิจ 2025
+- เพิ่ม fixed sources mode ในหน้า `/ui` เดิมและ API scrape เพื่อให้กำหนด source URLs ตรง ๆ แล้ว ingest ต่อได้
+- เพิ่ม MLflow config และ observability helper สำหรับ tracking pipeline
+- เพิ่ม evaluation logic สำหรับ semantic vs structured retrieval และ answer quality
+- เพิ่ม prompt registry sync, pipeline snapshot, และ logging ของ scrape/OCR/ingest/eval เข้า MLflow
+- เพิ่มไฟล์ deploy ขั้นต่ำสำหรับ Vercel คือ `api/index.py` และ `vercel.json`
+
+3. Prompt สำหรับให้ AI สร้างสไลด์
+คัดลอก prompt ด้านล่างไปใช้ได้ทันที
+
+สร้างสไลด์ presentation ภาษาไทยแบบมืออาชีพ สำหรับโปรเจคชื่อ "Thai Business Insight AI" โดยใช้โทนเนื้อหาแบบ business + AI product และคงศัพท์เทคนิคภาษาอังกฤษที่จำเป็นไว้ได้
+
+บริบทของโปรเจค:
+- โปรเจคนี้เป็น AI Business Research Agent สำหรับ scrape ข้อมูลธุรกิจจากเว็บ, OCR เอกสาร/PDF, ingest เข้า semantic + structured RAG, และตอบคำถามเชิงธุรกิจโดยอ้างอิงแหล่งข้อมูล
+- ระบบมีหน้า UI สำหรับผู้ใช้ปลายทางชื่อ UI_FORUSER เพื่อถามคำถามอย่างเดียว โดยไม่เห็นเครื่องมือ dev
+- มี backend FastAPI สำหรับ pipeline scrape, OCR, ingest, evaluation, และ ask endpoint
+- ใช้ semantic retrieval, structured retrieval, และ fallback lexical retrieval เมื่อ embeddings ใช้งานไม่ได้
+- รองรับ MLflow สำหรับ tracking data ingestion, RAG evaluation, prompt versioning, และ pipeline snapshot
+- แนวทาง deploy ที่แนะนำคือใช้ Vercel เป็น public frontend/API layer และใช้เครื่อง local/worker server สำหรับ scraping, OCR, ingest, และงานหนัก จากนั้น sync ผลลัพธ์ผ่าน database/shared storage/API
+
+สิ่งที่พัฒนาจริงในระบบ:
+- เพิ่มหน้า UI_FORUSER แยกจาก UI เดิม
+- ปรับ UI_FORUSER ให้เป็น product style โทนฟ้า-ขาว เรียบ ใช้งานง่าย และซ่อน sources ไว้ด้านล่างแบบเปิดดูเอง
+- เพิ่ม starter questions พร้อม keyword/source context
+- ปรับระบบ answer ให้เสถียรขึ้นเมื่อ embedding service มีปัญหา
+- เพิ่ม fallback semantic -> lexical retrieval
+- ทำให้ ingest ยังเก็บข้อมูลได้แม้ embeddings ล้ม
+- เพิ่ม fixed sources mode ให้ scrape จาก URLs ที่กำหนดเองได้
+- เพิ่ม MLflow tracking และ evaluation framework
+- เพิ่ม Vercel deployment entrypoint ระดับเริ่มต้น
+
+ให้จัดทำสไลด์ประมาณ 20 หน้า ตามโครงนี้:
+1. Executive Summary: 1 หน้า
+2. Problem Statement: 2 หน้า
+3. Solution: 2-3 หน้า
+4. Target Users: 1-2 หน้า
+5. System Architecture: 3-4 หน้า
+6. Implementation: 4-5 หน้า
+7. Results & Evaluation: 2-3 หน้า
+8. Impact & Sustainability: 1-2 หน้า
+9. Team & Contributions: 1 หน้า
+10. Conclusion & Future Work: 1 หน้า
+References & Appendix: ต่อท้ายตามเหมาะสม
+
+ข้อกำหนดสำคัญ:
+- ให้สไลด์มีสาระจริง ไม่ใช่ข้อความกว้าง ๆ
+- ในแต่ละหน้าให้ระบุ:
+  - ชื่อสไลด์
+  - objective ของสไลด์
+  - bullet points เนื้อหา
+  - visual suggestion ว่าควรใช้ภาพ/diagram/flowchart/metric chart แบบไหน
+  - speaker notes แบบสั้น
+- เน้นประเด็น business impact, technical rigor, และ deployability
+- ให้มีส่วนเปรียบเทียบข้อดีของแนวทาง hybrid deployment: Vercel + local worker
+- ให้มี architecture/data flow อธิบายตั้งแต่ scrape -> OCR -> ingest -> RAG -> answer -> evaluation -> MLflow
+- ให้มี metrics ที่ควรวัด เช่น retrieval precision@k, recall@k, context precision, answer relevance, faithfulness, latency, ingestion coverage
+- ให้เสนอ demo storyline สำหรับวันพรีเซนต์
+- ให้เขียนออกมาในรูปแบบพร้อมเอาไปทำสไลด์ต่อได้ทันที
+
+4. Prompt เสริมสำหรับทำ visual diagram list
+หลังจากสร้างโครงสไลด์แล้ว ให้ช่วยระบุเพิ่มว่า:
+- หน้าไหนควรมี architecture diagram
+- หน้าไหนควรมี deployment diagram
+- หน้าไหนควรมี UI screenshot
+- หน้าไหนควรมี evaluation chart
+- หน้าไหนควรมี roadmap
+

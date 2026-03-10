@@ -399,3 +399,45 @@ flowchart LR
   A --> OUT[Answer + Retrieved Chunks]
   API --> UI[UI Workflow Stepper + Logs]
 ```
+## MLflow
+
+ระบบรองรับ MLflow แบบ optional สำหรับ 4 ส่วนหลัก:
+
+- Data ingestion tracking: log metadata ของ scrape, caption, OCR และ ingest summary
+- RAG evaluation: log precision/recall, context precision, answer relevance, faithfulness
+- Prompt registry: sync prompt versions ของ router, synth, และ Tavily fallback
+- Pipeline snapshot: เก็บ manifest และไฟล์หลักของ pipeline สำหรับ re-run/compare
+
+ตัวอย่าง local setup:
+
+```bash
+mlflow ui --backend-store-uri ./mlruns --port 5000
+```
+
+แล้วตั้งค่า `.env`:
+
+```env
+MLFLOW_ENABLED=true
+MLFLOW_TRACKING_URI=http://127.0.0.1:5000
+MLFLOW_EXPERIMENT=thai-business-insight-ai
+MLFLOW_PROMPT_EXPERIMENT=thai-business-insight-prompts
+MLFLOW_REGISTER_PIPELINE=true
+```
+
+ถ้าไม่เปิด MLflow ให้ตั้ง `MLFLOW_ENABLED=false` ระบบจะทำงานต่อแบบ no-op tracker
+
+## Vercel Deploy
+
+มีไฟล์ขั้นต่ำให้แล้ว:
+
+- `api/index.py`
+- `vercel.json`
+
+ข้อจำกัดสำคัญ:
+
+- Vercel ไม่เหมาะกับ Ollama local, Postgres local, OCR job หนัก, หรือ MLflow localhost
+- ตอน deploy จริงควรใช้ external services:
+  - managed Postgres/pgvector
+  - remote LLM/embedding endpoint
+  - remote MLflow tracking server + artifact store
+- ถ้าจะใช้ Vercel จริง แนะนำให้ deploy เฉพาะ FastAPI app/UI แล้วแยก scraping/OCR เป็น worker service อีกตัว

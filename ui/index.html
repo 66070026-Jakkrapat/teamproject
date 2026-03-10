@@ -4,270 +4,190 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Agent Console</title>
-
   <style>
-    /* ====== Premium Dark UI (inline, no framework) ====== */
-    *{box-sizing:border-box}
-    :root{
-      --bg0:#070a10;
-      --bg1:#0b1020;
-      --card:rgba(255,255,255,.055);
-      --border:rgba(255,255,255,.10);
-
-      --text:rgba(255,255,255,.92);
-      --muted:rgba(255,255,255,.62);
-      --faint:rgba(255,255,255,.44);
-
-      --accent:#7aa7ff;
-      --accent2:#8ef0c9;
-
+    * { box-sizing: border-box; }
+    :root {
+      --bg0: #070a10;
+      --bg1: #0b1020;
+      --card: rgba(255,255,255,.055);
+      --border: rgba(255,255,255,.10);
+      --text: rgba(255,255,255,.92);
+      --muted: rgba(255,255,255,.62);
+      --faint: rgba(255,255,255,.44);
+      --accent: #7aa7ff;
+      --accent2: #8ef0c9;
       --shadow: 0 18px 40px rgba(0,0,0,.55);
       --radius: 18px;
       --radius-sm: 14px;
-
-      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
-      --sans: system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans Thai",sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans Thai", sans-serif;
     }
-
-    html,body{height:100%}
-    body{
-      margin:0;
-      font-family:var(--sans);
-      color:var(--text);
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--text);
       background:
         radial-gradient(1200px 700px at 20% -10%, rgba(122,167,255,.16), transparent 55%),
         radial-gradient(900px 600px at 90% 0%, rgba(142,240,201,.10), transparent 55%),
         radial-gradient(900px 600px at 40% 110%, rgba(122,167,255,.10), transparent 60%),
         linear-gradient(180deg, var(--bg0), var(--bg1) 55%, #070a10 120%);
     }
-
-    /* Topbar */
-    .topbar{
-      position:sticky; top:0; z-index:20;
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
       backdrop-filter: blur(10px);
       background: rgba(7,10,16,.55);
-      border-bottom:1px solid rgba(255,255,255,.08);
+      border-bottom: 1px solid rgba(255,255,255,.08);
     }
-    .topbar__inner{
-      max-width:1160px;
-      margin:0 auto;
-      padding:14px 18px;
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:14px;
+    .topbar__inner {
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
     }
-    .brand{display:flex;align-items:center;gap:12px}
-    .brand__mark{
-      width:36px;height:36px;border-radius:12px;
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand__mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 12px;
       background:
         radial-gradient(16px 16px at 30% 30%, rgba(255,255,255,.22), transparent 60%),
         linear-gradient(135deg, rgba(122,167,255,.85), rgba(142,240,201,.65));
       box-shadow: 0 10px 22px rgba(0,0,0,.35);
     }
-    .brand__title{font-weight:650; letter-spacing:.2px}
-    .brand__sub{font-size:12px;color:var(--muted); margin-top:2px}
-
-    /* Layout */
-    .wrap{max-width:1160px;margin:0 auto;padding:18px 18px 26px}
-    .grid{
-      display:grid;
+    .brand__title { font-weight: 650; letter-spacing: .2px; }
+    .brand__sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .wrap { max-width: 1160px; margin: 0 auto; padding: 18px 18px 26px; }
+    .grid {
+      display: grid;
       grid-template-columns: 1.15fr .85fr;
-      gap:14px;
-      align-items:start;
+      gap: 14px;
+      align-items: start;
     }
-    @media (max-width: 980px){
-      .grid{grid-template-columns:1fr}
-    }
-
-    /* Cards */
-    .card{
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+    .card {
       background: linear-gradient(180deg, var(--card), rgba(255,255,255,.04));
-      border:1px solid var(--border);
+      border: 1px solid var(--border);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      overflow:hidden;
+      overflow: hidden;
     }
-    .card + .card{margin-top:14px}
-    .card__head{
-      padding:16px 16px 10px;
-      border-bottom:1px solid rgba(255,255,255,.06);
+    .card + .card { margin-top: 14px; }
+    .card__head {
+      padding: 16px 16px 10px;
+      border-bottom: 1px solid rgba(255,255,255,.06);
       background: rgba(255,255,255,.02);
     }
-    .card__title{margin:0; font-size:15px; letter-spacing:.2px}
-    .card__desc{margin:6px 0 0; font-size:12.5px; color:var(--muted); line-height:1.55}
-    .card--sticky{
-      position:sticky;
-      top:76px;
-    }
-
-    /* Form */
-    .form{padding:14px 16px 8px}
-    .row{display:flex; gap:10px; align-items:end; flex-wrap:wrap}
-    .row--2{display:grid; grid-template-columns: 1fr 240px; gap:10px; align-items:end}
-    .row--3{display:grid; grid-template-columns: 1fr 1fr 140px; gap:10px; align-items:end}
-    @media (max-width: 980px){
-      .row--2,.row--3{grid-template-columns:1fr}
-    }
-
-    .field{display:flex; flex-direction:column; gap:7px; width:100%}
-    .field__label{
-      font-size:12px;
-      color:var(--faint);
-      letter-spacing:.2px;
-    }
-    .field--actions{width:100%}
-
-    .input{
-      width:100%;
+    .card__title { margin: 0; font-size: 15px; letter-spacing: .2px; }
+    .card__desc { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+    .card--sticky { position: sticky; top: 76px; }
+    .form { padding: 14px 16px 8px; }
+    .row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+    .row--2 { display: grid; grid-template-columns: 1fr 240px; gap: 10px; align-items: end; }
+    .row--3 { display: grid; grid-template-columns: 1fr 1fr 140px; gap: 10px; align-items: end; }
+    @media (max-width: 980px) { .row--2, .row--3 { grid-template-columns: 1fr; } }
+    .field { display: flex; flex-direction: column; gap: 7px; width: 100%; }
+    .field__label { font-size: 12px; color: var(--faint); letter-spacing: .2px; }
+    .field--actions { width: 100%; }
+    .input {
+      width: 100%;
       border-radius: 14px;
-      border:1px solid rgba(255,255,255,.10);
+      border: 1px solid rgba(255,255,255,.10);
       background: rgba(10,14,24,.62);
       color: var(--text);
-      padding:11px 12px;
-      outline:none;
-      transition: border-color .15s ease, box-shadow .15s ease;
+      padding: 11px 12px;
+      outline: none;
     }
-    .input::placeholder{color: rgba(255,255,255,.38)}
-    .input:focus{
-      border-color: rgba(122,167,255,.55);
-      box-shadow: 0 0 0 4px rgba(122,167,255,.14);
-    }
-
-    /* Buttons */
-    .btn{
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      gap:8px;
-      padding:11px 12px;
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 11px 12px;
       border-radius: 14px;
-      border:1px solid rgba(255,255,255,.12);
+      border: 1px solid rgba(255,255,255,.12);
       background: rgba(255,255,255,.06);
       color: var(--text);
-      cursor:pointer;
-      text-decoration:none;
-      font-weight:600;
-      letter-spacing:.2px;
-      transition: transform .12s ease, background .12s ease, border-color .12s ease, box-shadow .12s ease;
-      user-select:none;
+      cursor: pointer;
+      text-decoration: none;
+      font-weight: 600;
     }
-    .btn:hover{transform: translateY(-1px); border-color: rgba(255,255,255,.18)}
-    .btn:active{transform: translateY(0px)}
-    .btn--primary{
+    .btn--primary {
       border-color: rgba(122,167,255,.30);
       background: linear-gradient(135deg, rgba(122,167,255,.28), rgba(142,240,201,.16));
-      box-shadow: 0 10px 22px rgba(0,0,0,.35);
     }
-    .btn--primary:hover{
-      border-color: rgba(122,167,255,.42);
-      box-shadow: 0 14px 28px rgba(0,0,0,.45);
+    .btn--secondary { background: rgba(255,255,255,.07); }
+    .btn--ghost { background: transparent; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.05);
+      font-size: 11px;
+      color: rgba(255,255,255,.86);
+      letter-spacing: .2px;
     }
-    .btn--secondary{
-      border-color: rgba(255,255,255,.14);
-      background: rgba(255,255,255,.07);
+    .badge--local {
+      border-color: rgba(142,240,201,.28);
+      background: rgba(142,240,201,.12);
     }
-    .btn--ghost{
-      background: transparent;
-      border-color: rgba(255,255,255,.12);
+    .badge--remote {
+      border-color: rgba(122,167,255,.28);
+      background: rgba(122,167,255,.14);
     }
-    .btn--ghost:hover{
-      background: rgba(255,255,255,.06);
+    .badge--idle {
+      border-color: rgba(255,255,255,.10);
+      background: rgba(255,255,255,.04);
     }
-
-    /* Outputs */
-    .output{padding:0 16px 16px}
-    .output__head{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap:10px;
-      padding:10px 2px 10px;
+    .output { padding: 0 16px 16px; }
+    .output__head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 2px 10px;
     }
-    .output__title{font-size:12px;color:var(--faint);letter-spacing:.25px}
-    .output__hint{font-size:12px;color:rgba(255,255,255,.38)}
-
-    .pre{
-      margin:0;
-      white-space:pre-wrap;
-      word-break:break-word;
+    .output__title { font-size: 12px; color: var(--faint); letter-spacing: .25px; }
+    .output__hint { font-size: 12px; color: rgba(255,255,255,.38); }
+    .pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
       font-family: var(--mono);
-      font-size:12.5px;
-      line-height:1.6;
-
+      font-size: 12.5px;
+      line-height: 1.6;
       background: rgba(6,10,18,.72);
-      border:1px solid rgba(255,255,255,.10);
+      border: 1px solid rgba(255,255,255,.10);
       border-radius: var(--radius-sm);
-      padding:12px 12px;
+      padding: 12px 12px;
       min-height: 54px;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
     }
-    .pre--answer{
-      font-family: var(--sans);
-      font-size: 14px;
-      line-height: 1.75;
-    }
-
-    /* Details */
-    .details{
+    .pre--answer { font-family: var(--sans); font-size: 14px; line-height: 1.75; }
+    .details {
       margin: 10px 16px 16px;
-      border:1px solid rgba(255,255,255,.10);
+      border: 1px solid rgba(255,255,255,.10);
       border-radius: var(--radius-sm);
       background: rgba(255,255,255,.03);
-      overflow:hidden;
+      overflow: hidden;
     }
-    .details__summary{
-      cursor:pointer;
-      list-style:none;
-      padding:12px 12px;
-      font-weight:600;
-      color: rgba(255,255,255,.78);
-    }
-    .details__summary::-webkit-details-marker{display:none}
-    .details__body{padding:0 12px 12px}
-    .minihead{
-      margin:12px 0 8px;
-      font-size:12px;
-      color: rgba(255,255,255,.65);
-      letter-spacing:.2px;
-    }
-
-    /* Note / Footer */
-    .note{
-      margin-top:14px;
-      padding:14px 16px;
-      border-radius: var(--radius);
-      border:1px solid rgba(255,255,255,.10);
-      background: rgba(255,255,255,.035);
-    }
-    .note__title{font-weight:650; font-size:13px; margin-bottom:6px}
-    .note__text{color: var(--muted); font-size:12.5px; line-height:1.6}
-    .kbd{
-      display:inline-block;
-      padding:2px 8px;
-      border-radius:999px;
-      border:1px solid rgba(255,255,255,.14);
-      background: rgba(255,255,255,.06);
-      font-family: var(--mono);
-      font-size: 12px;
-      color: rgba(255,255,255,.82);
-    }
-
-    .footer{
-      margin-top:16px;
-      padding:10px 2px 0;
-      display:flex;
-      align-items:center;
-      gap:10px;
-      color: rgba(255,255,255,.42);
-      font-size: 12px;
-    }
-    .dot{width:6px;height:6px;border-radius:99px;background: rgba(142,240,201,.85)}
-    .sep{opacity:.6}
-    .muted{color: rgba(255,255,255,.35)}
+    .details__summary { cursor: pointer; list-style: none; padding: 12px; font-weight: 600; color: rgba(255,255,255,.78); }
+    .details__summary::-webkit-details-marker { display: none; }
+    .details__body { padding: 0 12px 12px; }
+    .minihead { margin: 12px 0 8px; font-size: 12px; color: rgba(255,255,255,.65); letter-spacing: .2px; }
+    .footer { margin-top: 16px; padding: 10px 2px 0; display: flex; align-items: center; gap: 10px; color: rgba(255,255,255,.42); font-size: 12px; }
+    .dot { width: 6px; height: 6px; border-radius: 99px; background: rgba(142,240,201,.85); }
+    .sep { opacity: .6; }
+    .muted { color: rgba(255,255,255,.35); }
   </style>
 </head>
-
 <body>
   <header class="topbar">
     <div class="topbar__inner">
@@ -275,10 +195,9 @@
         <div class="brand__mark" aria-hidden="true"></div>
         <div class="brand__text">
           <div class="brand__title">Agent Console</div>
-          <div class="brand__sub">Scrape · OCR · RAG · Q&A</div>
+          <div class="brand__sub">Scrape · OCR · RAG · Hybrid Worker</div>
         </div>
       </div>
-
       <div class="topbar__actions">
         <a class="btn btn--ghost" href="/ui/workflow" target="_blank" rel="noopener">Workflow</a>
       </div>
@@ -287,41 +206,41 @@
 
   <main class="wrap">
     <section class="grid">
-      <!-- LEFT: Controls -->
       <div class="col">
         <div class="card">
           <div class="card__head">
             <div>
               <h2 class="card__title">External Pipeline</h2>
-              <p class="card__desc">เริ่มเก็บข้อมูลจากเว็บตามคีย์เวิร์ด และสร้าง job_id สำหรับติดตามผล</p>
+              <p class="card__desc">เริ่ม scrape และ ingest ได้ทั้ง local หรือ remote worker พร้อมคืน job id สำหรับติดตามงานต่อ</p>
             </div>
           </div>
-
           <div class="form">
             <label class="field">
               <span class="field__label">Keyword</span>
               <input id="kw" class="input" placeholder="เช่น SME ไทย รายงานประจำปี" />
             </label>
-
+            <label class="field">
+              <span class="field__label">Fixed sources (optional, one URL per line)</span>
+              <textarea id="fixedSources" class="input" rows="4" placeholder="https://example.com/article-1&#10;https://example.com/article-2"></textarea>
+            </label>
             <div class="row row--2">
               <label class="field">
                 <span class="field__label">Amount</span>
                 <input id="amt" class="input" type="number" value="3" min="1" max="10" />
               </label>
-
               <div class="field field--actions">
                 <span class="field__label">Action</span>
-                <button id="btnStart" class="btn btn--primary" type="button">
-                  Start pipeline
-                </button>
+                <button id="btnStart" class="btn btn--primary" type="button">Start pipeline</button>
               </div>
             </div>
           </div>
-
           <div class="output">
             <div class="output__head">
               <span class="output__title">Response</span>
-              <span class="output__hint">ผลลัพธ์จะขึ้นด้านล่าง</span>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span id="pipeMode" class="badge badge--idle">execution: idle</span>
+                <span class="output__hint">execution mode, worker base URL, job id</span>
+              </div>
             </div>
             <pre id="pipeOut" class="pre"></pre>
           </div>
@@ -330,46 +249,70 @@
         <div class="card">
           <div class="card__head">
             <div>
-              <h2 class="card__title">Ask</h2>
-              <p class="card__desc">ถามคำถามจากฐานความรู้ที่สร้างไว้ (RAG) พร้อมดูหลักฐานที่ดึงมา</p>
+              <h2 class="card__title">Internal PDF Upload</h2>
+              <p class="card__desc">อัปโหลด PDF เพื่อ OCR และ ingest เข้า internal namespace ได้ทั้ง local และ remote worker</p>
             </div>
           </div>
+          <div class="form">
+            <label class="field">
+              <span class="field__label">PDF file</span>
+              <input id="pdfFile" class="input" type="file" accept=".pdf,application/pdf" />
+            </label>
+            <label class="field">
+              <span class="field__label">Entity hint</span>
+              <input id="entityHint" class="input" value="internal_doc" />
+            </label>
+            <div class="row">
+              <button id="btnUploadPdf" class="btn btn--primary" type="button">Upload PDF</button>
+            </div>
+          </div>
+          <div class="output">
+            <div class="output__head">
+              <span class="output__title">Upload response</span>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span id="uploadMode" class="badge badge--idle">execution: idle</span>
+                <span class="output__hint">upload path, chunks, facts, job id</span>
+              </div>
+            </div>
+            <pre id="uploadOut" class="pre"></pre>
+          </div>
+        </div>
 
+        <div class="card">
+          <div class="card__head">
+            <div>
+              <h2 class="card__title">Ask</h2>
+              <p class="card__desc">ถามคำถามจาก knowledge base ที่ ingest แล้ว พร้อมดู chunks และ Tavily fallback</p>
+            </div>
+          </div>
           <div class="form">
             <label class="field">
               <span class="field__label">Question</span>
               <input id="q" class="input" placeholder="พิมพ์คำถาม..." />
             </label>
-
             <div class="row row--2">
               <label class="field">
                 <span class="field__label">Top K</span>
                 <input id="topk" class="input" type="number" value="8" min="1" max="30" />
               </label>
-
               <div class="field field--actions">
                 <span class="field__label">Action</span>
-                <button id="btnAsk" class="btn btn--primary" type="button">
-                  Ask
-                </button>
+                <button id="btnAsk" class="btn btn--primary" type="button">Ask</button>
               </div>
             </div>
           </div>
-
           <div class="output">
             <div class="output__head">
               <span class="output__title">Answer</span>
-              <span class="output__hint">สรุปคำตอบ</span>
+              <span class="output__hint">grounded answer</span>
             </div>
             <pre id="answer" class="pre pre--answer"></pre>
           </div>
-
           <details class="details">
             <summary class="details__summary">Evidence & tools output</summary>
             <div class="details__body">
               <h3 class="minihead">Retrieved chunks meta</h3>
               <pre id="chunks" class="pre"></pre>
-
               <h3 class="minihead">Tavily results</h3>
               <pre id="tavily" class="pre"></pre>
             </div>
@@ -377,16 +320,43 @@
         </div>
       </div>
 
-      <!-- RIGHT: Preview -->
       <div class="col">
         <div class="card card--sticky">
           <div class="card__head">
             <div>
-              <h2 class="card__title">RAG Preview</h2>
-              <p class="card__desc">ตรวจรายการเอกสาร/ชิ้นส่วนข้อมูลที่ถูกเก็บใน namespace</p>
+              <h2 class="card__title">Hybrid Worker</h2>
+              <p class="card__desc">เช็ก worker health, track remote jobs และดู logs จากหน้าเดียว</p>
             </div>
           </div>
+          <div class="form">
+            <div class="row">
+              <button id="btnWorkerHealth" class="btn btn--secondary" type="button">Check worker health</button>
+              <button id="btnTrackJob" class="btn btn--ghost" type="button">Track job</button>
+            </div>
+            <label class="field">
+              <span class="field__label">Job ID</span>
+              <input id="jobId" class="input" placeholder="เช่น remote:abc123 หรือ local job id" />
+            </label>
+          </div>
+          <div class="output">
+            <div class="output__head">
+              <span class="output__title">Worker / Job output</span>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <span id="trackMode" class="badge badge--idle">tracking: idle</span>
+                <span class="output__hint">health, status, logs</span>
+              </div>
+            </div>
+            <pre id="workerOut" class="pre"></pre>
+          </div>
+        </div>
 
+        <div class="card card--sticky">
+          <div class="card__head">
+            <div>
+              <h2 class="card__title">RAG Preview</h2>
+              <p class="card__desc">ตรวจดู chunks ที่ถูกเก็บในแต่ละ namespace และ source type</p>
+            </div>
+          </div>
           <div class="form">
             <div class="row row--3">
               <label class="field">
@@ -396,47 +366,36 @@
                   <option value="internal">internal</option>
                 </select>
               </label>
-
               <label class="field">
                 <span class="field__label">Source type</span>
                 <input id="stype" class="input" placeholder="optional" />
               </label>
-
               <label class="field">
                 <span class="field__label">Limit</span>
                 <input id="limit" class="input" type="number" value="20" min="1" max="200" />
               </label>
             </div>
-
             <div class="row">
               <button id="btnPrev" class="btn btn--secondary" type="button">Preview</button>
             </div>
           </div>
-
           <div class="output">
             <div class="output__head">
-              <span class="output__title">Preview data</span>
-              <span class="output__hint">รายการล่าสุด</span>
+              <span class="output__title">Preview</span>
+              <span class="output__hint">raw chunk preview</span>
             </div>
             <pre id="preview" class="pre"></pre>
-          </div>
-        </div>
-
-        <div class="note">
-          <div class="note__title">Tip</div>
-          <div class="note__text">
-            ถ้า Start pipeline แล้วได้ <span class="kbd">job_id</span> ให้กด Workflow เพื่อใส่ job_id และติดตามขั้นตอน
           </div>
         </div>
       </div>
     </section>
 
-    <footer class="footer">
+    <div class="footer">
       <span class="dot"></span>
-      <span>Local console</span>
-      <span class="sep">•</span>
-      <span class="muted">Dark mode</span>
-    </footer>
+      <span>Use `/pipeline/external/scrape` to start jobs and `/jobs/{job_id}/status` to poll.</span>
+      <span class="sep">·</span>
+      <span class="muted">Remote jobs are returned as `remote:&lt;job_id&gt;`</span>
+    </div>
   </main>
 
   <script src="/ui/app.js"></script>

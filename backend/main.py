@@ -8,10 +8,13 @@ import threading
 import sys
 import traceback
 import asyncio
+import json
+import requests
+import httpx
 from typing import Any, Dict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, Body
+from fastapi import FastAPI, UploadFile, File, Body, Request, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -33,8 +36,10 @@ from backend.ocr.ocr_pipeline import process_folder_pdfs
 from backend.rag.rag_store import RAGStore
 from backend.rag.ingest import ingest_main_folder, ingest_text_blob
 from backend.agent.agent_flow import AgenticRAG
+from backend.agent import prompts as agent_prompts
 from backend.report_utils.report import generate_report_md
 from backend.evaluation.eval_runner import run_eval
+from backend.observability.mlflow_tracker import PromptSpec, mlflow_tracker
 
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -49,12 +54,162 @@ store = RAGStore(
 )
 agent = AgenticRAG(store=store)
 
+
+def _safe_json(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _summarize_scrape(scrape: Dict[str, Any]) -> Dict[str, Any]:
+    items = scrape.get("items") or []
+    return {
+        "keyword": scrape.get("keyword", ""),
+        "main_folder": scrape.get("main_folder", ""),
+        "csv_path": scrape.get("csv_path", ""),
+        "url_count": len(scrape.get("urls") or []),
+        "item_count": len(items),
+        "downloaded_images": sum(int(it.get("downloaded_images") or 0) for it in items),
+        "downloaded_files": sum(int(it.get("downloaded_files") or 0) for it in items),
+        "pdf_extracted": sum(int(it.get("pdf_extracted") or 0) for it in items),
+    }
+
+
+def _summarize_ocr(out_root: str) -> Dict[str, Any]:
+    summary = {
+        "ocr_docs_jsonl": 0,
+        "ocr_pages": 0,
+        "ocr_figures": 0,
+        "ocr_text_layer_pages": 0,
+        "ocr_paddle_pages": 0,
+    }
+    if not os.path.isdir(out_root):
+        return summary
+
+    for root, _, files in os.walk(out_root):
+        for fn in files:
+            if fn != "docs.jsonl":
+                continue
+            summary["ocr_docs_jsonl"] += 1
+            docs_path = os.path.join(root, fn)
+            with open(docs_path, "r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if obj.get("type") == "page_text":
+                        summary["ocr_pages"] += 1
+                        method = str(obj.get("extract_method") or "")
+                        if method == "text_layer":
+                            summary["ocr_text_layer_pages"] += 1
+                        elif method.startswith("paddleocr"):
+                            summary["ocr_paddle_pages"] += 1
+                    elif obj.get("type") == "figure":
+                        summary["ocr_figures"] += 1
+    return summary
+
+
+def _sync_prompt_registry() -> None:
+    prompts = [
+        PromptSpec(
+            name="router_prompt",
+            text=agent_prompts.ROUTER_PROMPT,
+            tool_name="router",
+            description="Route questions into semantic or structured retrieval.",
+        ),
+        PromptSpec(
+            name="synth_prompt",
+            text=agent_prompts.SYNTH_PROMPT,
+            tool_name="answer_synthesizer",
+            description="Grounded answer synthesis from retrieved context.",
+        ),
+        PromptSpec(
+            name="tavily_prompt",
+            text=agent_prompts.TAVILY_PROMPT,
+            tool_name="web_fallback",
+            description="Fallback web answer synthesis from Tavily snippets.",
+        ),
+    ]
+    mlflow_tracker.log_prompt_registry(prompts)
+
+
+def _register_pipeline_snapshot() -> None:
+    manifest = {
+        "pipeline_name": settings.MLFLOW_PIPELINE_NAME,
+        "api_entrypoint": "backend.main:app",
+        "ui_routes": ["/UI_FORUSER", "/ui", "/ui/workflow"],
+        "components": {
+            "scraping": "backend.scraping.web_scraping",
+            "ocr": "backend.ocr.ocr_pipeline",
+            "rag_store": "backend.rag.rag_store",
+            "agent": "backend.agent.agent_flow",
+            "evaluation": "backend.evaluation.eval_runner",
+        },
+        "models": {
+            "embed_model": settings.EMBED_MODEL,
+            "llm_model": settings.OLLAMA_LLM_MODEL,
+            "blip_model": settings.BLIP_MODEL,
+        },
+    }
+    files = [
+        os.path.join(os.path.dirname(__file__), "main.py"),
+        os.path.join(os.path.dirname(__file__), "agent", "prompts.py"),
+        os.path.join(os.path.dirname(__file__), "evaluation", "eval_runner.py"),
+    ]
+    mlflow_tracker.log_pipeline_snapshot(manifest, files=files)
+
+
+def _worker_headers() -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    if settings.WORKER_SHARED_SECRET:
+        headers["X-Worker-Secret"] = settings.WORKER_SHARED_SECRET
+    return headers
+
+
+def _remote_job_id(job_id: str) -> str:
+    return f"remote:{job_id}"
+
+
+def _split_remote_job_id(job_id: str) -> tuple[bool, str]:
+    if job_id.startswith("remote:"):
+        return True, job_id.split(":", 1)[1]
+    return False, job_id
+
+
+def _require_worker_secret(request: Request) -> None:
+    if not settings.WORKER_SHARED_SECRET:
+        return
+    given = request.headers.get("X-Worker-Secret", "")
+    if given != settings.WORKER_SHARED_SECRET:
+        raise HTTPException(status_code=401, detail="invalid worker secret")
+
+
+def _should_proxy_to_worker() -> bool:
+    return bool(settings.HYBRID_WORKER_ENABLED and settings.WORKER_BASE_URL)
+
+
+def _proxy_worker_json(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"{settings.WORKER_BASE_URL}{path}"
+    response = requests.post(
+        url,
+        json=payload,
+        headers=_worker_headers(),
+        timeout=settings.WORKER_TIMEOUT_SEC,
+    )
+    response.raise_for_status()
+    return response.json()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ✅ startup
     os.makedirs(settings.OUTPUT_BASE_DIR, exist_ok=True)
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     await store.init_db()
+    _sync_prompt_registry()
+    if settings.MLFLOW_REGISTER_PIPELINE:
+        _register_pipeline_snapshot()
     # ใน lifespan:
     warmup_blip(settings.BLIP_MODEL)
     yield
@@ -109,12 +264,18 @@ def swagger_custom_js():
 
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse(url="/ui")
+    return RedirectResponse(url="/UI_FORUSER")
 
 
 @app.get("/ui", include_in_schema=False)
 def ui_index():
     return FileResponse(os.path.join(UI_DIR, "index.html"))
+
+
+@app.get("/UI_FORUSER", include_in_schema=False)
+@app.get("/ui_foruser", include_in_schema=False)
+def ui_foruser():
+    return FileResponse(os.path.join(UI_DIR, "ui_foruser.html"))
 
 
 @app.get("/ui/workflow", include_in_schema=False)
@@ -125,6 +286,11 @@ def ui_workflow():
 @app.get("/ui/app.js", include_in_schema=False)
 def ui_app_js():
     return FileResponse(os.path.join(UI_DIR, "app.js"))
+
+
+@app.get("/ui/app_foruser.js", include_in_schema=False)
+def ui_foruser_js():
+    return FileResponse(os.path.join(UI_DIR, "app_foruser.js"))
 
 
 @app.get("/ui/workflow.js", include_in_schema=False)
@@ -143,11 +309,30 @@ def workflow_steps():
 
 @app.get("/jobs/{job_id}/status")
 def job_status(job_id: str):
+    is_remote, actual_job_id = _split_remote_job_id(job_id)
+    if is_remote and settings.WORKER_BASE_URL:
+        response = requests.get(
+            f"{settings.WORKER_BASE_URL}/jobs/{actual_job_id}/status",
+            headers=_worker_headers(),
+            timeout=settings.WORKER_TIMEOUT_SEC,
+        )
+        response.raise_for_status()
+        return response.json()
     return get_status(job_id)
 
 
 @app.get("/jobs/{job_id}/logs")
 def job_logs(job_id: str, tail: int = 200):
+    is_remote, actual_job_id = _split_remote_job_id(job_id)
+    if is_remote and settings.WORKER_BASE_URL:
+        response = requests.get(
+            f"{settings.WORKER_BASE_URL}/jobs/{actual_job_id}/logs",
+            headers=_worker_headers(),
+            params={"tail": tail},
+            timeout=settings.WORKER_TIMEOUT_SEC,
+        )
+        response.raise_for_status()
+        return response.json()
     return {"job_id": job_id, "logs": get_logs(job_id, tail=tail)}
 
 
@@ -168,13 +353,203 @@ def health():
     }
 
 
+@app.get("/worker/health")
+def worker_health(request: Request):
+    _require_worker_secret(request)
+    return {
+        "status": "ok",
+        "mode": "worker",
+        "hybrid_proxy_enabled": settings.HYBRID_WORKER_ENABLED,
+        "worker_base_url": settings.WORKER_BASE_URL,
+    }
+
+
+@app.get("/worker/status")
+def worker_status():
+    data: Dict[str, Any] = {
+        "hybrid_worker_enabled": settings.HYBRID_WORKER_ENABLED,
+        "worker_base_url": settings.WORKER_BASE_URL,
+        "worker_secret_configured": bool(settings.WORKER_SHARED_SECRET),
+    }
+    if not settings.WORKER_BASE_URL:
+        data["reachable"] = False
+        data["message"] = "WORKER_BASE_URL is not configured"
+        return data
+
+    try:
+        response = requests.get(
+            f"{settings.WORKER_BASE_URL}/worker/health",
+            headers=_worker_headers(),
+            timeout=min(settings.WORKER_TIMEOUT_SEC, 20),
+        )
+        response.raise_for_status()
+        data["reachable"] = True
+        data["worker"] = response.json()
+    except Exception as e:
+        data["reachable"] = False
+        data["error"] = str(e)
+    return data
+
+
 def _run_async(coro):
     return asyncio.run(coro)
 
 
-def _external_pipeline_thread(job_id: str, keyword: str, amount: int):
+def _external_pipeline_impl(job_id: str, keyword: str, amount: int, fixed_sources: list[str] | None = None):
+    try:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        source_mode = "fixed_sources" if fixed_sources else "search"
+        with mlflow_tracker.start_run(
+            run_name=f"external-pipeline-{job_id}",
+            tags={"kind": "external_pipeline", "job_id": job_id, "source_mode": source_mode},
+        ):
+            mlflow_tracker.log_params(
+                {
+                    "job_id": job_id,
+                    "keyword": keyword,
+                    "amount": amount,
+                    "source_mode": source_mode,
+                    "fixed_source_count": len(fixed_sources or []),
+                    "embed_model": settings.EMBED_MODEL,
+                    "llm_model": settings.OLLAMA_LLM_MODEL,
+                    "blip_model": settings.BLIP_MODEL,
+                }
+            )
+
+            set_stage(job_id, "web_scraping", f"Scraping keyword={keyword} amount={amount} mode={source_mode}")
+            log(job_id, "info", "Starting external scrape...")
+            scrape = run_external_scrape(job_id, keyword, max_links=amount, fixed_sources=fixed_sources)
+            main_folder = scrape["main_folder"]
+            items = scrape["items"]
+
+            scrape_summary = _summarize_scrape(scrape)
+            mlflow_tracker.log_dict(scrape_summary, "scrape/summary.json")
+            mlflow_tracker.log_metrics(
+                {
+                    "scrape_item_count": scrape_summary["item_count"],
+                    "scrape_url_count": scrape_summary["url_count"],
+                    "scrape_downloaded_images": scrape_summary["downloaded_images"],
+                    "scrape_downloaded_files": scrape_summary["downloaded_files"],
+                    "scrape_pdf_extracted": scrape_summary["pdf_extracted"],
+                }
+            )
+
+            set_stage(job_id, "data_collecting", "Saved web content/images/pdfs", {"main_folder": main_folder, "items": items})
+            log(job_id, "info", "External scrape complete", {"main_folder": main_folder})
+
+            set_stage(job_id, "captioning", "Captioning images (BLIP + Argos)...")
+            caption_stats = []
+            for it in items:
+                site_folder = it["Folder"]
+                content_path = os.path.join(site_folder, "content.txt")
+                ctx = ""
+                if os.path.exists(content_path):
+                    with open(content_path, "r", encoding="utf-8", errors="ignore") as handle:
+                        ctx = handle.read()
+
+                images_dir = os.path.join(site_folder, "images")
+                images_meta = os.path.join(images_dir, "images_meta.jsonl")
+                images_under = os.path.join(site_folder, "images_understanding.jsonl")
+                images_download_meta = os.path.join(images_dir, "images_download_meta.jsonl")
+
+                res = caption_images_with_blip_and_translate(
+                    images_dir=images_dir,
+                    images_meta_jsonl=images_meta,
+                    images_understanding_jsonl=images_under,
+                    context_text=ctx,
+                    blip_model=settings.BLIP_MODEL,
+                    images_download_meta_jsonl=images_download_meta,
+                    dedupe=True,
+                )
+                caption_stats.append({"site_folder": site_folder, **res})
+                log(job_id, "info", "Captioned images", {"site_folder": site_folder, **res})
+
+            if caption_stats:
+                mlflow_tracker.log_dict({"items": caption_stats}, "captioning/results.json")
+
+            set_stage(job_id, "ocr", "OCR PDFs (PyMuPDF + PaddleOCR)...")
+            out_root = os.path.join(main_folder, "ocr_results")
+            os.makedirs(out_root, exist_ok=True)
+
+            def pcb(p: dict):
+                if p.get("stage") in ("file_start", "page_done", "file_done", "done"):
+                    log(job_id, "info", "OCR progress", p)
+
+            process_folder_pdfs(files_dir=main_folder, out_root=out_root, progress_cb=pcb)
+            ocr_summary = _summarize_ocr(out_root)
+            mlflow_tracker.log_dict(ocr_summary, "ocr/summary.json")
+            mlflow_tracker.log_metrics(ocr_summary)
+
+            set_stage(job_id, "ingest_external", "Ingest to External RAG...")
+            store_thread = RAGStore(
+                database_url=settings.DATABASE_URL,
+                ollama_host=settings.OLLAMA_HOST,
+                embed_model=settings.EMBED_MODEL,
+                embed_dims=settings.EMBED_DIMS,
+            )
+
+            async def _ingest():
+                await store_thread.init_db()
+                summary = await ingest_main_folder(store_thread, "external", main_folder)
+                await store_thread.engine.dispose()
+                return summary
+
+            ingest_summary = run_async_in_new_loop(_ingest())
+            mlflow_tracker.log_dict(ingest_summary, "ingest/summary.json")
+            mlflow_tracker.log_metrics(
+                {
+                    "ingest_added_chunks": ingest_summary.get("added_chunks", 0),
+                    "ingest_added_facts": ingest_summary.get("added_facts", 0),
+                    "ingest_skipped": ingest_summary.get("skipped", 0),
+                }
+            )
+            log(job_id, "info", "Ingest external done", ingest_summary)
+
+            report_path = generate_report_md(
+                main_folder,
+                {
+                    "job_id": job_id,
+                    "keyword": keyword,
+                    "namespace": "external",
+                    "ingest": ingest_summary,
+                },
+            )
+            mlflow_tracker.log_artifacts([report_path], artifact_path="reports")
+            if os.path.exists(scrape_summary["csv_path"]):
+                mlflow_tracker.log_artifacts([scrape_summary["csv_path"]], artifact_path="scrape")
+            mlflow_tracker.log_text(
+                _safe_json({"scrape": scrape_summary, "ocr": ocr_summary, "ingest": ingest_summary}),
+                "pipeline/run_summary.json",
+            )
+
+            log(job_id, "info", "Generated report.md", {"report_path": report_path})
+            set_stage(
+                job_id,
+                "ready",
+                "External pipeline completed โ…",
+                {
+                    "main_folder": main_folder,
+                    "ingest": ingest_summary,
+                    "report_path": report_path,
+                },
+            )
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        msg = f"Pipeline failed: {type(e).__name__}: {repr(e)}"
+        set_stage(job_id, "error", msg)
+        log(job_id, "error", "Pipeline exception", {"error": repr(e), "type": type(e).__name__, "traceback": tb})
+
+
+def _external_pipeline_thread(job_id: str, keyword: str, amount: int, fixed_sources: list[str] | None = None):
     if sys.platform.startswith("win"):
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    return _external_pipeline_impl(job_id, keyword, amount, fixed_sources)
 
     try:
         try:
@@ -183,9 +558,10 @@ def _external_pipeline_thread(job_id: str, keyword: str, amount: int):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-        set_stage(job_id, "web_scraping", f"Scraping keyword={keyword} amount={amount}")
+        source_mode = "fixed_sources" if fixed_sources else "search"
+        set_stage(job_id, "web_scraping", f"Scraping keyword={keyword} amount={amount} mode={source_mode}")
         log(job_id, "info", "Starting external scrape...")
-        scrape = run_external_scrape(job_id, keyword, max_links=amount)
+        scrape = run_external_scrape(job_id, keyword, max_links=amount, fixed_sources=fixed_sources)
         main_folder = scrape["main_folder"]
         items = scrape["items"]
 
@@ -279,17 +655,64 @@ def _external_pipeline_thread(job_id: str, keyword: str, amount: int):
 def start_external_scrape(payload: Dict[str, Any] = Body(...)):
     keyword = (payload.get("keyword") or "").strip()
     amount = int(payload.get("amount") or 5)
+    fixed_sources = payload.get("fixed_sources") or []
+    if isinstance(fixed_sources, str):
+        fixed_sources = [line.strip() for line in fixed_sources.splitlines() if line.strip()]
+    elif isinstance(fixed_sources, list):
+        fixed_sources = [str(x).strip() for x in fixed_sources if str(x).strip()]
+    else:
+        fixed_sources = []
     if not keyword:
         return {"status": "bad_request", "message": "keyword required"}
+    if _should_proxy_to_worker():
+        remote = _proxy_worker_json(
+            "/worker/pipeline/external/scrape",
+            {"keyword": keyword, "amount": amount, "fixed_sources": fixed_sources},
+        )
+        remote["job_id"] = _remote_job_id(str(remote.get("job_id", "")))
+        remote["execution"] = "remote_worker"
+        remote["worker_base_url"] = settings.WORKER_BASE_URL
+        return remote
 
     job_id = uuid.uuid4().hex[:12]
     new_job(job_id, kind="external_pipeline")
     log(job_id, "info", "Job created")
 
-    t = threading.Thread(target=_external_pipeline_thread, args=(job_id, keyword, amount), daemon=True)
+    t = threading.Thread(target=_external_pipeline_thread, args=(job_id, keyword, amount, fixed_sources), daemon=True)
     t.start()
 
-    return {"status": "ok", "job_id": job_id}
+    return {"status": "ok", "job_id": job_id, "mode": "fixed_sources" if fixed_sources else "search", "fixed_sources": fixed_sources}
+
+
+@app.post("/worker/pipeline/external/scrape")
+def worker_start_external_scrape(request: Request, payload: Dict[str, Any] = Body(...)):
+    _require_worker_secret(request)
+    keyword = (payload.get("keyword") or "").strip()
+    amount = int(payload.get("amount") or 5)
+    fixed_sources = payload.get("fixed_sources") or []
+    if isinstance(fixed_sources, str):
+        fixed_sources = [line.strip() for line in fixed_sources.splitlines() if line.strip()]
+    elif isinstance(fixed_sources, list):
+        fixed_sources = [str(x).strip() for x in fixed_sources if str(x).strip()]
+    else:
+        fixed_sources = []
+    if not keyword:
+        return {"status": "bad_request", "message": "keyword required"}
+
+    job_id = uuid.uuid4().hex[:12]
+    new_job(job_id, kind="external_pipeline")
+    log(job_id, "info", "Worker job created")
+
+    t = threading.Thread(target=_external_pipeline_thread, args=(job_id, keyword, amount, fixed_sources), daemon=True)
+    t.start()
+
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "mode": "fixed_sources" if fixed_sources else "search",
+        "fixed_sources": fixed_sources,
+        "execution": "worker_local",
+    }
 
 
 @app.post("/facebook/scrape_post")
@@ -315,6 +738,22 @@ async def upload_pdf(file: UploadFile = File(...), entity_hint: str = "internal_
     """
     ✅ แก้: เก็บไฟล์ลงโฟลเดอร์เฉพาะ job แล้ว OCR เฉพาะโฟลเดอร์นั้น
     """
+    if _should_proxy_to_worker():
+        file_bytes = await file.read()
+        async with httpx.AsyncClient(timeout=settings.WORKER_TIMEOUT_SEC) as client:
+            response = await client.post(
+                f"{settings.WORKER_BASE_URL}/worker/pipeline/internal/upload_pdf",
+                headers=_worker_headers(),
+                params={"entity_hint": entity_hint},
+                files={"file": (file.filename, file_bytes, file.content_type or "application/pdf")},
+            )
+            response.raise_for_status()
+            remote = response.json()
+            remote["job_id"] = _remote_job_id(str(remote.get("job_id", "")))
+            remote["execution"] = "remote_worker"
+            remote["worker_base_url"] = settings.WORKER_BASE_URL
+            return remote
+
     job_id = uuid.uuid4().hex[:12]
     new_job(job_id, kind="internal_pipeline")
 
@@ -373,13 +812,39 @@ async def upload_pdf(file: UploadFile = File(...), entity_hint: str = "internal_
     return {"status": "ok", "job_id": job_id, "upload_path": save_path, "added_chunks": added_chunks, "added_facts": added_facts}
 
 
+@app.post("/worker/pipeline/internal/upload_pdf")
+async def worker_upload_pdf(request: Request, file: UploadFile = File(...), entity_hint: str = "internal_doc"):
+    _require_worker_secret(request)
+    original_hybrid = settings.HYBRID_WORKER_ENABLED
+    settings.HYBRID_WORKER_ENABLED = False
+    try:
+        return await upload_pdf(file=file, entity_hint=entity_hint)
+    finally:
+        settings.HYBRID_WORKER_ENABLED = original_hybrid
+
+
 @app.post("/ask")
 async def ask(payload: Dict[str, Any] = Body(...)):
     q = (payload.get("question") or "").strip()
     if not q:
         return {"status": "bad_request", "message": "question required"}
     top_k = int(payload.get("top_k") or settings.RAG_TOP_K)
-    out = await agent.answer(q, top_k=top_k)
+    try:
+        out = await agent.answer(q, top_k=top_k)
+    except Exception as e:
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": "ask pipeline failed",
+            "error": str(e),
+        }
+    warnings = []
+    for meta in out.get("chunks") or []:
+        warning = (meta or {}).get("warning")
+        if warning and warning not in warnings:
+            warnings.append(warning)
+    if warnings:
+        out["warnings"] = warnings
     return {"status": "ok", **out}
 
 
@@ -402,7 +867,7 @@ async def eval_run(payload: Dict[str, Any] = Body(...)):
     k = int(payload.get("k") or 5)
     if not dataset_path or not os.path.exists(dataset_path):
         return {"status": "bad_request", "message": "dataset_path not found"}
-    results = await run_eval(store, dataset_path, namespace, k=k)
+    results = await run_eval(store, dataset_path, namespace, k=k, agent=agent)
     return {"status": "ok", "namespace": namespace, "k": k, "results": results}
 
 def run_async_in_new_loop(coro):
@@ -413,7 +878,9 @@ def run_async_in_new_loop(coro):
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"✅ Swagger: http://localhost:{settings.API_PORT}/docs")
-    print(f"✅ UI:      http://localhost:{settings.API_PORT}/ui")
-    print(f"✅ Flow UI: http://localhost:{settings.API_PORT}/ui/workflow")
+    print(f"Root:       http://localhost:{settings.API_PORT}/")
+    print(f"UI_FORUSER: http://localhost:{settings.API_PORT}/UI_FORUSER")
+    print(f"UI:         http://localhost:{settings.API_PORT}/ui")
+    print(f"Flow UI:    http://localhost:{settings.API_PORT}/ui/workflow")
+    print(f"Swagger:    http://localhost:{settings.API_PORT}/docs")
     uvicorn.run("backend.main:app", host=settings.API_HOST, port=settings.API_PORT, reload=True)

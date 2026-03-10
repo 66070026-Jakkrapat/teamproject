@@ -60,4 +60,20 @@ class Settings:
     ROUTE_PREFER_INTERNAL: bool = os.getenv("ROUTE_PREFER_INTERNAL", "true").lower() in ("1", "true", "yes")
     RAG_TOP_K: int = int(os.getenv("RAG_TOP_K", "8"))
 
+    # MLflow
+    MLFLOW_ENABLED: bool = os.getenv("MLFLOW_ENABLED", "false").lower() in ("1", "true", "yes")
+    MLFLOW_TRACKING_URI: str = os.getenv("MLFLOW_TRACKING_URI", "")
+    MLFLOW_EXPERIMENT: str = os.getenv("MLFLOW_EXPERIMENT", "thai-business-insight-ai")
+    MLFLOW_PROMPT_EXPERIMENT: str = os.getenv("MLFLOW_PROMPT_EXPERIMENT", "thai-business-insight-prompts")
+    MLFLOW_PIPELINE_NAME: str = os.getenv("MLFLOW_PIPELINE_NAME", "thai-business-insight-pipeline")
+    MLFLOW_ARTIFACT_LOCATION: str = os.getenv("MLFLOW_ARTIFACT_LOCATION", "")
+    MLFLOW_TAG_ENV: str = os.getenv("MLFLOW_TAG_ENV", "local")
+    MLFLOW_REGISTER_PIPELINE: bool = os.getenv("MLFLOW_REGISTER_PIPELINE", "false").lower() in ("1", "true", "yes")
+
+    # Hybrid worker deployment
+    HYBRID_WORKER_ENABLED: bool = os.getenv("HYBRID_WORKER_ENABLED", "false").lower() in ("1", "true", "yes")
+    WORKER_BASE_URL: str = os.getenv("WORKER_BASE_URL", "").rstrip("/")
+    WORKER_SHARED_SECRET: str = os.getenv("WORKER_SHARED_SECRET", "")
+    WORKER_TIMEOUT_SEC: int = int(os.getenv("WORKER_TIMEOUT_SEC", "180"))
+
 settings = Settings()

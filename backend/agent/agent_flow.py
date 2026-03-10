@@ -458,7 +458,7 @@ def split_inline_numbered_sections(text: str) -> List[str]:
     if not t:
         return []
 
-    matches = list(re.finditer(r"(?<!\d)(\d{1,2})\.\s*(?=[A-Za-zก-๙])", t))
+    matches = list(re.finditer(r"(?<!\d)(\d{1,2})\.\s*(?=[\"'“”‘’(\[]?[A-Za-zก-๙])", t))
     if not matches:
         return []
 
@@ -492,6 +492,7 @@ def extract_numbered_item(section: str) -> tuple[int, str, str] | None:
     else:
         cues = [
             "ประเทศไทย", "ความต้องการ", "รายงานจาก", "AI ", "AI และ", "ประชากรไทย",
+            "UN ระบุ", "จากการสำรวจของ Visa", "จากการสํารวจของ Visa", "Visa มีตัวเลข", "International Energy Agency", "AI และระบบ Automation จะ",
             "การเติบโต", "แม้สถานการณ์", "หนึ่งใน", "ในปี", "ปัจจุบัน",
         ]
         cut_positions = [body.find(cue) for cue in cues if body.find(cue) > 6]
@@ -534,6 +535,11 @@ def parse_numbered_section(section: str) -> tuple[int, str, str] | None:
         "ประเทศไทยเข้าสู่",
         "ความต้องการลดคาร์บอน",
         "AI และ Automation กลายเป็น",
+        "UN ระบุ",
+        "จากการสำรวจของ Visa",
+        "จากการสํารวจของ Visa",
+        "Visa มีตัวเลข",
+        "AI และระบบ Automation จะ",
         "ประชากรไทยกว่า",
         "รายงานจาก",
         "โดยข้อมูลจาก",
@@ -541,7 +547,11 @@ def parse_numbered_section(section: str) -> tuple[int, str, str] | None:
         "คาดว่า",
     ]
     cut_positions = [body.find(cue) for cue in title_cues if body.find(cue) > 6]
-    if cut_positions:
+    quoted = re.match(r"^[\"'“”‘’]([^\"“”‘’]+)[\"'“”‘’]\s*", body)
+    if quoted:
+        title = quoted.group(1).strip(" -:")
+        rest = body[quoted.end():].strip()
+    elif cut_positions:
         cut = min(cut_positions)
         title = body[:cut].strip(" -:")
         rest = body[cut:].strip()
