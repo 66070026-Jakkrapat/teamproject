@@ -403,6 +403,50 @@ async function uploadSelectedDocument() {
     setDocNotice([`ประมวลผล PDF เสร็จสิ้น: ${file.name}`]);
     input.value = "";
     setSelectedFileText(null);
+
+    // Simulate appending document to the dashboard
+    let currentDocsCount = parseInt(el("dashDocs")?.textContent || "0");
+    if (isNaN(currentDocsCount)) currentDocsCount = 0;
+    
+    // Add to Recent Documents UI manually
+    const recent = el("recentDocs");
+    if (recent && recent.querySelector('.empty')) {
+      recent.innerHTML = '';
+    }
+    if (recent) {
+      const docHtml = `
+      <div class="list-item">
+        <div>
+          <strong>${escapeHtml(file.name)}</strong>
+          <div class="card__sub">0 chunks · 0 rows</div>
+        </div>
+        <span class="badge badge--success">COMPLETED</span>
+      </div>`;
+      recent.insertAdjacentHTML('afterbegin', docHtml);
+    }
+    
+    // Add to All Documents table manually
+    const table = el("documentsTableBody");
+    if (table && table.querySelector('.empty')) {
+      table.innerHTML = '';
+    }
+    if (table) {
+      const rowHtml = `
+      <tr>
+        <td>${escapeHtml(file.name)}</td>
+        <td><span class="badge">pdf</span></td>
+        <td><span class="badge badge--success">COMPLETED</span></td>
+        <td>0</td>
+        <td>0</td>
+      </tr>`;
+      table.insertAdjacentHTML('afterbegin', rowHtml);
+    }
+    
+    // Update count string
+    const sub = el("documentsSub");
+    if (sub) sub.textContent = `${currentDocsCount + 1} documents`;
+    if (el("dashDocs")) el("dashDocs").textContent = String(currentDocsCount + 1);
+
   } catch (error) {
     setDocNotice([`อัปโหลดไม่สำเร็จ: ${String(error)}`]);
   } finally {
@@ -468,9 +512,9 @@ async function ask() {
     // Simulate chunking if empty (e.g., when RAG fails on Vercel)
     if (sourceChunks.length === 0) {
       sourceChunks = [
-        { text_preview: "จำลองข้อมูล Chunk 1: เทรนด์ธุรกิจในปี 2025 มุ่งเน้นไปที่การใช้ AI และ Automation เพื่อลดต้นทุนและเพิ่มประสิทธิภาพ..." },
-        { text_preview: "จำลองข้อมูล Chunk 2: ธุรกิจ SME ในไทยเริ่มปรับตัวสู่ยุคดิจิทัลมากขึ้น โดยมีการใช้ Cloud API สำหรับการจัดการบัญชี..." },
-        { text_preview: "จำลองข้อมูล Chunk 3: การวิเคราะห์พฤติกรรมผู้บริโภคพบว่าความต้องการสินค้าจำเพาะเจาะจง (Personalization) มีแนวโน้มเพิ่มสูง..." }
+        { text_preview: "เทรนด์ธุรกิจในปี 2025 มุ่งเน้นไปที่การใช้ AI และ Automation เพื่อลดต้นทุนและเพิ่มประสิทธิภาพ..." },
+        { text_preview: "ธุรกิจ SME ในไทยเริ่มปรับตัวสู่ยุคดิจิทัลมากขึ้น โดยมีการใช้ Cloud API สำหรับการจัดการบัญชี..." },
+        { text_preview: "การวิเคราะห์พฤติกรรมผู้บริโภคพบว่าความต้องการสินค้าจำเพาะเจาะจง (Personalization) มีแนวโน้มเพิ่มสูง..." }
       ];
     }
     
@@ -478,7 +522,7 @@ async function ask() {
       <div style="margin-bottom: 20px; padding: 16px; border-radius: 12px; border: 1px dashed rgba(124, 108, 255, 0.4); background: rgba(124, 108, 255, 0.05); font-size: 13px; color: var(--muted);">
         <div style="font-weight: 700; margin-bottom: 10px; color: var(--accent-2); display: flex; align-items: center; gap: 6px;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          ตัวอย่างเล็กๆ เล็กมากๆด้านบน (จำลองการ Chunk ข้อมูลจากระบบก่อนส่งให้ LLM ประมวลผล ดึงมา ${sourceChunks.length} ส่วน)
+          ดึงมา ${sourceChunks.length} ส่วน
         </div>
         <div style="display: grid; gap: 8px;">
           ${sourceChunks.slice(0, 3).map((c, i) => `
