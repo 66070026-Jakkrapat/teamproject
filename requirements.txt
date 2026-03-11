@@ -6,6 +6,7 @@ requests
 httpx
 openai>=1.0
 pypdf
+python-multipart
 
 # Database (optional — needed for RAG queries on Vercel)
 sqlalchemy>=2.0
