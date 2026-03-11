@@ -3,6 +3,7 @@
 # Vercel serverless entry point.
 #
 # ทำงานจริงบน Vercel — ใช้ OpenAI GPT API + RAG (ถ้ามี DB)
+# Deploy version: 2026-03-11T14:52
 # ─────────────────────────────────────────────────────────
 from __future__ import annotations
 
