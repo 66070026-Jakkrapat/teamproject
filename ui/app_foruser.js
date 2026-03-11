@@ -334,34 +334,71 @@ async function uploadSelectedDocument() {
   button.textContent = "Uploading...";
   setNotice([]);
   setDocNotice([]);
+  
+  const progressContainer = el("uploadProgressContainer");
+  const uploadProgressBar = el("uploadProgressBar");
+  const uploadPercentage = el("uploadPercentage");
+  const analysisArea = el("docAnalysisArea");
+  
+  progressContainer.style.display = "block";
+  analysisArea.style.display = "none";
+  uploadProgressBar.style.width = "0%";
+  uploadPercentage.textContent = "0%";
 
   try {
     const form = new FormData();
     form.append("file", file);
-    const response = await fetch("/api/pdf_summary", {
-      method: "POST",
-      body: form
+    
+    // Use XMLHttpRequest for progress tracking
+    const data = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      
+      xhr.upload.addEventListener("progress", (event) => {
+        if (event.lengthComputable) {
+          // Uploading phase (0-50%)
+          const percentComplete = Math.round((event.loaded / event.total) * 50);
+          uploadProgressBar.style.width = percentComplete + "%";
+          uploadPercentage.textContent = percentComplete + "%";
+        }
+      });
+      
+      xhr.addEventListener("load", () => {
+        // Upload finished, now Waiting for AI Analysis phase (50-100%)
+        uploadProgressBar.style.width = "75%";
+        uploadPercentage.textContent = "75% (Analyzing PDF...)";
+        
+        let responseData;
+        try {
+          responseData = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+        } catch {
+          responseData = { message: xhr.responseText };
+        }
+        
+        if (xhr.status >= 200 && xhr.status < 300) {
+          uploadProgressBar.style.width = "100%";
+          uploadPercentage.textContent = "100%";
+          resolve(responseData);
+        } else {
+          reject(new Error(responseData.message || responseData.error || `upload failed (${xhr.status})`));
+        }
+      });
+      
+      xhr.addEventListener("error", () => {
+        reject(new Error("Network Error occurred"));
+      });
+      
+      xhr.open("POST", "/api/pdf_summary");
+      xhr.send(form);
     });
-    const rawText = await response.text();
-    let data = {};
-    try {
-      data = rawText ? JSON.parse(rawText) : {};
-    } catch {
-      data = { message: rawText };
-    }
-    if (!response.ok || data.status !== "ok") {
-      throw new Error(data.message || data.error || `upload failed (${response.status})`);
+
+    if (data.status !== "ok") {
+      throw new Error(data.message || data.error || "Unknown error from server");
     }
     
-    // Switch to chat and append the file summary
-    window.location.hash = "chat";
-    switchPage("chat");
-    appendMessage({ role: "user", text: `(อัปโหลดไฟล์ PDF: ${file.name})`, meta: "อัปโหลดไฟล์" });
-    appendMessage({
-      role: "assistant",
-      html: escapeHtml(data.summary || "สรุปเรียบร้อย").replace(/\\n/g, '<br>'),
-      meta: "Financial Data Agent · PDF Summary"
-    });
+    // Display result inline
+    el("docAnalysisFilename").textContent = file.name;
+    el("docAnalysisContent").innerHTML = escapeHtml(data.summary || "สรุปเรียบร้อย").replace(/\\n/g, '<br>');
+    analysisArea.style.display = "block";
 
     setDocNotice([`ประมวลผล PDF เสร็จสิ้น: ${file.name}`]);
     input.value = "";
@@ -371,6 +408,11 @@ async function uploadSelectedDocument() {
   } finally {
     button.disabled = false;
     button.textContent = "Upload PDF";
+    setTimeout(() => {
+      progressContainer.style.display = "none";
+      uploadProgressBar.style.width = "0%";
+      uploadPercentage.textContent = "0%";
+    }, 2000);
   }
 }
 
