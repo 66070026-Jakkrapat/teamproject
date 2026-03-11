@@ -7,27 +7,15 @@ from typing import Any, Dict, List
 
 import httpx
 
+from backend.llm_client import create_llm
+
 from backend.settings import settings
 from backend.rag.rag_store import RAGStore, RetrievedChunk
 from backend.agent.prompts import ROUTER_PROMPT, SYNTH_PROMPT, TAVILY_PROMPT
 from backend.agent.tavily_client import tavily_search
 
 
-class OllamaLLM:
-    def __init__(self, host: str, model: str, timeout_s: int = 120):
-        self.host = host.rstrip("/")
-        self.model = model
-        self.timeout_s = timeout_s
-
-    async def generate(self, prompt: str) -> str:
-        payload = {"model": self.model, "prompt": prompt, "stream": False}
-        timeout = httpx.Timeout(self.timeout_s)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(f"{self.host}/api/generate", json=payload)
-        if r.status_code != 200:
-            raise RuntimeError(f"Ollama generate failed: {r.status_code} {r.text[:200]}")
-        data = r.json()
-        return (data.get("response") or "").strip()
+# OllamaLLM moved to backend.llm_client
 
 
 def heuristic_route(question: str) -> str:
@@ -872,7 +860,7 @@ def is_context_sufficient(chunks: List[RetrievedChunk], ctx: str) -> bool:
 class AgenticRAG:
     def __init__(self, store: RAGStore):
         self.store = store
-        self.llm = OllamaLLM(settings.OLLAMA_HOST, settings.OLLAMA_LLM_MODEL)
+        self.llm = create_llm()
 
     async def _expand_from_primary_source(self, question: str, chunks: List[RetrievedChunk]) -> List[RetrievedChunk]:
         if not chunks:

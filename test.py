@@ -12,7 +12,7 @@ from backend.rag.rag_store import RAGStore
 from backend.evaluation.eval_runner import run_eval
 
 def cmd_eval(args):
-    store = RAGStore(settings.DATABASE_URL, settings.OLLAMA_HOST, settings.EMBED_MODEL, settings.EMBED_DIMS)
+    store = RAGStore(settings.DATABASE_URL, embed_dims=settings.EMBED_DIMS)
     async def run():
         await store.init_db()
         res = await run_eval(store, args.dataset, args.namespace, k=args.k)

@@ -30,6 +30,12 @@ class Settings:
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
     OLLAMA_LLM_MODEL: str = os.getenv("OLLAMA_LLM_MODEL", "llama3.1:8b")
 
+    # OpenAI
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")  # "openai" or "ollama"
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    OPENAI_EMBED_MODEL: str = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+
     # Vision caption
     BLIP_MODEL: str = os.getenv("BLIP_MODEL", "Salesforce/blip-image-captioning-base")
     ARGOS_SRC_LANG: str = os.getenv("ARGOS_SRC_LANG", "en")

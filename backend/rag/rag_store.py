@@ -28,33 +28,7 @@ def sha1_text(s: str) -> str:
 # ============================================================
 # Embedder
 # ============================================================
-class OllamaEmbedder:
-    def __init__(self, host: str, model: str, timeout_s: int = 60, max_concurrency: int = 4):
-        self.host = host.rstrip("/")
-        self.model = model
-        self.timeout_s = timeout_s
-        self.max_concurrency = max(1, int(max_concurrency))
-
-    async def embed_one(self, text: str) -> List[float]:
-        payload = {"model": self.model, "prompt": text}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_s)) as client:
-            r = await client.post(f"{self.host}/api/embeddings", json=payload)
-        if r.status_code != 200:
-            raise RuntimeError(f"Ollama embeddings failed: {r.status_code} {r.text[:200]}")
-        data = r.json()
-        emb = data.get("embedding")
-        if not isinstance(emb, list):
-            raise RuntimeError("Ollama embeddings invalid response")
-        return [float(x) for x in emb]
-
-    async def embed_many(self, texts: List[str]) -> List[List[float]]:
-        sem = asyncio.Semaphore(self.max_concurrency)
-
-        async def _one(t: str) -> List[float]:
-            async with sem:
-                return await self.embed_one(t)
-
-        return await asyncio.gather(*[_one(t) for t in texts])
+# OllamaEmbedder moved to backend.llm_client
 
 
 # ============================================================
@@ -109,11 +83,20 @@ class RetrievedChunk:
 # RAGStore
 # ============================================================
 class RAGStore:
-    def __init__(self, database_url: str, ollama_host: str, embed_model: str, embed_dims: int = 768):
+    def __init__(self, database_url: str, embedder=None, embed_dims: int = 768,
+                 ollama_host: str = "", embed_model: str = ""):
         self.database_url = database_url
         self.engine = create_async_engine(database_url, echo=False, future=True)
         self.SessionLocal = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
-        self.embedder = OllamaEmbedder(host=ollama_host, model=embed_model)
+        if embedder is not None:
+            self.embedder = embedder
+        elif ollama_host and embed_model:
+            # backward compat: create Ollama embedder
+            from backend.llm_client import OllamaEmbedder
+            self.embedder = OllamaEmbedder(host=ollama_host, model=embed_model)
+        else:
+            from backend.llm_client import create_embedder
+            self.embedder = create_embedder(dims=embed_dims)
         self.embed_dims = embed_dims
 
     def _zero_embedding(self) -> List[float]:

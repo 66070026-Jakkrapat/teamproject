@@ -103,11 +103,11 @@ store = None
 agent = None
 if _CORE_OK and settings.DATABASE_URL:
     try:
+        from backend.llm_client import create_embedder
         store = RAGStore(
             database_url=settings.DATABASE_URL,
-            ollama_host=settings.OLLAMA_HOST,
-            embed_model=settings.EMBED_MODEL,
-            embed_dims=settings.EMBED_DIMS
+            embedder=create_embedder(dims=settings.EMBED_DIMS),
+            embed_dims=settings.EMBED_DIMS,
         )
         agent = AgenticRAG(store=store)
     except Exception:
@@ -770,8 +770,6 @@ def _external_pipeline_impl(job_id: str, keyword: str, amount: int, fixed_source
             set_stage(job_id, "ingest_external", "Ingest to External RAG...")
             store_thread = RAGStore(
                 database_url=settings.DATABASE_URL,
-                ollama_host=settings.OLLAMA_HOST,
-                embed_model=settings.EMBED_MODEL,
                 embed_dims=settings.EMBED_DIMS,
             )
 

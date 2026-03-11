@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 import httpx
 
 from backend.settings import settings
+from backend.llm_client import create_llm
 from backend.utils.text import normalize_text
 
 
@@ -28,21 +29,7 @@ def _safe_json_parse(s: str) -> Dict[str, Any]:
         return {}
 
 
-class OllamaLLM:
-    def __init__(self, host: str, model: str, timeout_s: int = 120):
-        self.host = host.rstrip("/")
-        self.model = model
-        self.timeout_s = timeout_s
-
-    async def generate(self, prompt: str) -> str:
-        payload = {"model": self.model, "prompt": prompt, "stream": False}
-        timeout = httpx.Timeout(self.timeout_s)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(f"{self.host}/api/generate", json=payload)
-        if r.status_code != 200:
-            raise RuntimeError(f"Ollama generate failed: {r.status_code} {r.text[:200]}")
-        data = r.json()
-        return (data.get("response") or "").strip()
+# OllamaLLM moved to backend.llm_client
 
 
 EXTRACT_PROMPT = """You are an information extraction system.
@@ -87,7 +74,7 @@ async def extract_facts_llm(text: str, entity_hint: str = "unknown") -> List[Dic
     if len(t) < 50:
         return []
 
-    llm = OllamaLLM(settings.OLLAMA_HOST, settings.OLLAMA_LLM_MODEL)
+    llm = create_llm()
     prompt = EXTRACT_PROMPT.format(entity_hint=entity_hint, text=t[:6000])
 
     try:

@@ -1,4 +1,12 @@
-# Vercel proxy: only needs FastAPI + httpx to proxy requests to worker
+# Vercel deployment: OpenAI API + optional RAG
 fastapi
 uvicorn[standard]
+python-dotenv
+requests
 httpx
+openai>=1.0
+
+# Database (optional — needed for RAG queries on Vercel)
+sqlalchemy>=2.0
+asyncpg
+pgvector
