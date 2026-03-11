@@ -5,6 +5,7 @@ python-dotenv
 requests
 httpx
 openai>=1.0
+pypdf
 
 # Database (optional — needed for RAG queries on Vercel)
 sqlalchemy>=2.0

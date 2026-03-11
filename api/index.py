@@ -336,12 +336,35 @@ async def pipeline_external_scrape():
     )
 
 
-@app.post("/pipeline/internal/upload_pdf")
-async def pipeline_upload_pdf():
-    return JSONResponse(
-        {"status": "error", "message": "PDF upload ไม่สามารถทำบน Vercel ได้ กรุณาใช้ local server"},
-        status_code=501,
-    )
+@app.post("/api/pdf_summary")
+async def api_pdf_summary(file: UploadFile = File(...)):
+    await _ensure_init()
+    if _llm is None:
+        return JSONResponse({"status": "error", "message": "LLM not initialized. Check OPENAI_API_KEY."}, 500)
+    
+    try:
+        import pypdf
+        import io
+        
+        content = await file.read()
+        reader = pypdf.PdfReader(io.BytesIO(content))
+        text = ""
+        # Limit to 10 pages to avoid hitting token limits
+        for i in range(min(10, len(reader.pages))):
+            extracted = reader.pages[i].extract_text()
+            if extracted:
+                text += extracted + "\n"
+        
+        prompt = (
+            f"คุณเป็นผู้เชี่ยวชาญด้านการวิเคราะห์ข้อมูล วิจารณ์และสรุปเอกสาร PDF ต่อไปนี้ให้กระชับ "
+            f"ดึงประเด็นสำคัญที่สุดออกมา 3-5 ข้อ (เป็นภาษาไทย)\n\n"
+            f"ชื่อไฟล์: {file.filename}\n\nเนื้อหาบางส่วน:\n{text[:15000]}"
+        )
+        answer = await _llm.generate(prompt)
+        return {"status": "ok", "summary": answer, "filename": file.filename}
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"status": "error", "message": f"Failed to parse PDF: {str(e)}"}, 500)
 
 
 @app.post("/facebook/scrape_post")
