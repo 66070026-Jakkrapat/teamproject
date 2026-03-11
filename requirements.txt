@@ -23,9 +23,12 @@ pythainlp>=5.0.0
 # ML / Embeddings
 numpy>=1.26.0
 scikit-learn>=1.6.0
+openai>=1.50.0
+mlflow>=2.10.0
 
 # Utilities
 python-dotenv>=1.0.0
 pydantic>=2.10.0
 pydantic-settings>=2.7.0
 aiofiles>=24.1.0
+beautifulsoup4>=4.12.0

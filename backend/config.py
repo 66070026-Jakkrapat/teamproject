@@ -2,6 +2,10 @@
 
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -12,10 +16,16 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # Ollama
+    # Ollama Embeddings (Keep for now, but migrating LLM to OpenAI)
     OLLAMA_HOST: str = "http://localhost:11434"
     EMBED_MODEL: str = "nomic-embed-text:latest"
-    OLLAMA_LLM_MODEL: str = "llama3.1:8b"
+
+    # OpenAI & MLflow
+    OPENAI_API_KEY: str = ""
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    MLFLOW_TRACKING_URI: str = ""
+    MLFLOW_TRACKING_USERNAME: str = ""
+    MLFLOW_TRACKING_PASSWORD: str = ""
 
     # Typhoon OCR
     TYPHOON_API_KEY: str = ""
@@ -29,6 +39,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "allow"
 
 
 @lru_cache()

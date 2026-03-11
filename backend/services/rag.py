@@ -1,7 +1,9 @@
 """Hybrid RAG engine: Vector Search + Text-to-SQL."""
 
 import json
-import httpx
+import time
+import mlflow
+from openai import AsyncOpenAI
 from typing import List, Dict, Any, Optional
 from sqlalchemy import text as sql_text, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +12,10 @@ from backend.services.embedding import get_embedding
 from backend.models import Chunk, Document
 
 settings = get_settings()
+
+if settings.MLFLOW_TRACKING_URI:
+    mlflow.set_tracking_uri(settings.MLFLOW_TRACKING_URI)
+mlflow.set_experiment("Financial_Data_Agent")
 
 
 async def vector_search(
@@ -79,18 +85,22 @@ async def generate_sql_from_query(question: str, session: AsyncSession) -> str:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{settings.OLLAMA_HOST}/api/generate",
-                json={
-                    "model": settings.OLLAMA_LLM_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 500}
-                }
+        start_time = time.time()
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        
+        with mlflow.start_run(nested=True, run_name="generate_sql") as run:
+            mlflow.log_param("model", settings.OPENAI_MODEL)
+            mlflow.log_param("question", question)
+            mlflow.log_text(prompt, "prompt_text.txt")
+
+            response = await client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=500
             )
-            response.raise_for_status()
-            sql = response.json().get("response", "").strip()
+            
+            sql = response.choices[0].message.content.strip()
 
             # Clean up the SQL (remove markdown fences if present)
             if sql.startswith("```"):
@@ -98,6 +108,10 @@ async def generate_sql_from_query(question: str, session: AsyncSession) -> str:
                 if sql.startswith("sql"):
                     sql = sql[3:]
                 sql = sql.strip()
+
+            response_time = time.time() - start_time
+            mlflow.log_metric("response_time_sec", response_time)
+            mlflow.log_text(sql, "generated_sql.txt")
 
             return sql
     except Exception as e:

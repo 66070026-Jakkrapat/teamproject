@@ -1,12 +1,19 @@
 """Agent Orchestrator: decides whether to use Vector Search or Text-to-SQL."""
 
-import httpx
+import time
 from typing import Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
+import mlflow
+from openai import AsyncOpenAI
+
 from backend.config import get_settings
 from backend.services.rag import vector_search, execute_text_to_sql
 
 settings = get_settings()
+
+if settings.MLFLOW_TRACKING_URI:
+    mlflow.set_tracking_uri(settings.MLFLOW_TRACKING_URI)
+mlflow.set_experiment("Financial_Data_Agent")
 
 
 async def classify_query_intent(question: str) -> str:
@@ -26,18 +33,24 @@ async def classify_query_intent(question: str) -> str:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            response = await client.post(
-                f"{settings.OLLAMA_HOST}/api/generate",
-                json={
-                    "model": settings.OLLAMA_LLM_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 10}
-                }
+        start_time = time.time()
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        
+        with mlflow.start_run(nested=True, run_name="classify_intent") as run:
+            mlflow.log_param("model", settings.OPENAI_MODEL)
+            mlflow.log_text(prompt, "prompt_text.txt")
+
+            response = await client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=10
             )
-            response.raise_for_status()
-            intent = response.json().get("response", "").strip().lower()
+            intent = response.choices[0].message.content.strip().lower()
+            
+            response_time = time.time() - start_time
+            mlflow.log_metric("response_time_sec", response_time)
+            mlflow.log_param("response_text", intent)
 
             if "sql" in intent:
                 return "sql"
@@ -71,18 +84,29 @@ async def generate_final_answer(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            response = await client.post(
-                f"{settings.OLLAMA_HOST}/api/generate",
-                json={
-                    "model": settings.OLLAMA_LLM_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1, "num_predict": 2000}
-                }
+        start_time = time.time()
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        
+        with mlflow.start_run(nested=True, run_name="generate_final_answer") as run:
+            mlflow.log_param("model", settings.OPENAI_MODEL)
+            mlflow.log_param("question", question)
+            mlflow.log_param("method_used", method)
+            mlflow.log_text(prompt, "prompt_text.txt")
+
+            response = await client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=2000
             )
-            response.raise_for_status()
-            return response.json().get("response", "").strip()
+            
+            answer = response.choices[0].message.content.strip()
+            
+            response_time = time.time() - start_time
+            mlflow.log_metric("response_time_sec", response_time)
+            mlflow.log_text(answer, "response_text.txt")
+
+            return answer
     except Exception as e:
         print(f"⚠️ LLM Generation error details: {e.__class__.__name__}: {str(e)}")
         return f"เกิดข้อผิดพลาดในการสร้างคำตอบ: {str(e)}"

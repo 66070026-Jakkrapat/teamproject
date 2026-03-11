@@ -1,0 +1,21 @@
+# Environments
+.env
+.env.*
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# MLflow
+mlruns/
+*.mlflow
+
+# Mac/OS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
