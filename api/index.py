@@ -19,7 +19,7 @@ if _PROJECT_ROOT not in sys.path:
 
 # ── Lightweight imports ──────────────────────────────────
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, File, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
