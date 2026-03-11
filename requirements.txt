@@ -1,37 +1,17 @@
+# Lightweight dependencies for Vercel deployment
+# Heavy ML packages (torch, paddleocr, transformers, etc.) are excluded
+# because they exceed Vercel's 500 MB Lambda limit.
+# Heavy processing is offloaded to a separate worker.
+
 fastapi
 uvicorn[standard]
 python-dotenv
 requests
-pandas
+httpx
 beautifulsoup4
-playwright
-pillow
-
-pymupdf
 numpy
-paddleocr
-scikit-learn
 
+# Database (required for RAG queries on Vercel)
 sqlalchemy>=2.0
 asyncpg
 pgvector
-
-transformers
-torch
-torchvision
-
-argostranslate
-
-httpx
-
-DrissionPage
-pydub
-SpeechRecognition
-
-sentencepiece
-
-opencv-python
-
-protobuf
-accelerate
-mlflow>=2.14

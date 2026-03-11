@@ -3,10 +3,7 @@
   "builds": [
     {
       "src": "api/index.py",
-      "use": "@vercel/python",
-      "config": {
-        "pipRequirementsFile": "requirements-vercel.txt"
-      }
+      "use": "@vercel/python"
     }
   ],
   "routes": [
@@ -16,3 +13,4 @@
     }
   ]
 }
+
