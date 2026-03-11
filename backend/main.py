@@ -28,12 +28,16 @@ from backend.utils.job_manager import (
 # ✅ set env Paddle ไว้ตรงนี้ (กันหลุด)
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "true")
 
-# --- Core (lightweight) imports ---
-from backend.rag.rag_store import RAGStore, RAGChunk, RAGFact
-from backend.rag.ingest import ingest_main_folder, ingest_text_blob
-from backend.agent.agent_flow import AgenticRAG
-from backend.agent import prompts as agent_prompts
-from backend.report_utils.report import generate_report_md
+# --- Core imports (may fail on Vercel if DB packages are incomplete) ---
+try:
+    from backend.rag.rag_store import RAGStore, RAGChunk, RAGFact
+    from backend.rag.ingest import ingest_main_folder, ingest_text_blob
+    from backend.agent.agent_flow import AgenticRAG
+    from backend.agent import prompts as agent_prompts
+    from backend.report_utils.report import generate_report_md
+    _CORE_OK = True
+except Exception:
+    _CORE_OK = False
 
 # --- Heavy imports (may not be available on Vercel) ---
 try:
@@ -94,13 +98,22 @@ if sys.platform.startswith("win"):
 
 UI_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ui"))
 
-store = RAGStore(
-    database_url=settings.DATABASE_URL,
-    ollama_host=settings.OLLAMA_HOST,
-    embed_model=settings.EMBED_MODEL,
-    embed_dims=settings.EMBED_DIMS
-)
-agent = AgenticRAG(store=store)
+# --- Lazy init: only create store/agent if core packages + DATABASE_URL are available ---
+store = None
+agent = None
+if _CORE_OK and settings.DATABASE_URL:
+    try:
+        store = RAGStore(
+            database_url=settings.DATABASE_URL,
+            ollama_host=settings.OLLAMA_HOST,
+            embed_model=settings.EMBED_MODEL,
+            embed_dims=settings.EMBED_DIMS
+        )
+        agent = AgenticRAG(store=store)
+    except Exception:
+        store = None
+        agent = None
+
 
 
 def _safe_json(data: Any) -> str:
@@ -451,7 +464,8 @@ async def lifespan(app: FastAPI):
     # ✅ startup
     os.makedirs(settings.OUTPUT_BASE_DIR, exist_ok=True)
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    await store.init_db()
+    if store:
+        await store.init_db()
     _sync_prompt_registry()
     if settings.MLFLOW_REGISTER_PIPELINE:
         _register_pipeline_snapshot()
